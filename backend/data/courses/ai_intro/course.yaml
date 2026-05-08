@@ -1,0 +1,21 @@
+id: ai_intro
+title: 人工智能导论
+level: undergraduate
+language: zh-CN
+chapters:
+  - { id: ch01, title: 人工智能概述, file: chapters/01-ai-overview.md }
+  - { id: ch02, title: 搜索问题与启发式搜索, file: chapters/02-search.md }
+  - { id: ch03, title: 知识表示与推理, file: chapters/03-knowledge-representation.md }
+  - { id: ch04, title: 机器学习基础, file: chapters/04-machine-learning-basics.md }
+  - { id: ch05, title: 监督学习, file: chapters/05-supervised-learning.md }
+  - { id: ch06, title: 无监督学习, file: chapters/06-unsupervised-learning.md }
+  - { id: ch07, title: 神经网络与深度学习入门, file: chapters/07-neural-networks.md }
+  - { id: ch08, title: 自然语言处理基础, file: chapters/08-nlp.md }
+  - { id: ch09, title: 计算机视觉基础, file: chapters/09-cv.md }
+  - { id: ch10, title: 强化学习基础, file: chapters/10-rl.md }
+  - { id: ch11, title: 大模型与提示词工程, file: chapters/11-llm-prompting.md }
+  - { id: ch12, title: AI 伦理、安全与应用实践, file: chapters/12-ai-ethics.md }
+code_cases:
+  - { id: case_astar, title: A* 搜索路径规划, file: examples/search_a_star.py }
+  - { id: case_classifier, title: 鸢尾花分类器与评估指标, file: examples/ml_classification.py }
+  - { id: case_rag, title: 本地资料检索增强问答, file: examples/local_rag_demo.py }
