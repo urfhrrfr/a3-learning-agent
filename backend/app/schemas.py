@@ -29,7 +29,7 @@ class Profile(BaseModel):
 
 
 class ProfileChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=1000)
 
 
 class ProfileChatResponse(BaseModel):
@@ -40,10 +40,11 @@ class ProfileChatResponse(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    course: str = "人工智能导论"
-    chapter: str = "机器学习基础"
-    goal: str = "掌握核心概念并完成练习"
-    pain_points: list[str] = Field(default_factory=list)
+    course: str = Field(default="人工智能导论", min_length=1, max_length=80)
+    chapter: str = Field(default="机器学习基础", min_length=1, max_length=80)
+    goal: str = Field(default="掌握核心概念并完成练习", min_length=1, max_length=200)
+    pain_points: list[str] = Field(default_factory=list, max_length=10)
+    resource_types: list[str] = Field(default_factory=list, max_length=12)
 
 
 class AgentTrace(BaseModel):
@@ -53,9 +54,16 @@ class AgentTrace(BaseModel):
     status: Literal["pending", "running", "completed", "failed"]
     input_summary: str
     output_summary: str
+    collaboration_stage: str = ""
+    boundary: str = ""
+    depends_on: list[str] = Field(default_factory=list)
     source_refs: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     confidence: float = 0.8
+    retry_count: int = 0
+    llm_provider: str = ""
+    arbitration_note: str = ""
+    review_conclusion: str = ""
     started_at: str
     finished_at: str | None = None
 
@@ -70,6 +78,11 @@ class Resource(BaseModel):
     difficulty: str
     target_profile: list[str]
     review_status: Literal["passed", "needs_revision", "blocked"]
+    review_reason: str = ""
+    audit_reason: str = ""
+    review_notes: list[str] = Field(default_factory=list)
+    review_confidence: float = 0.0
+    user_feedback: Literal["neutral", "favorite", "hidden"] = "neutral"
     created_by_agents: list[str]
     created_at: str
 
@@ -107,7 +120,7 @@ class LearningPath(BaseModel):
 
 
 class TutorRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=1000)
     resource_id: str | None = None
 
 
@@ -118,8 +131,37 @@ class TutorResponse(BaseModel):
 
 
 class QuizSubmitRequest(BaseModel):
-    answers: list[str]
+    answers: list[str] = Field(min_length=1, max_length=20)
     resource_id: str | None = None
+
+
+class ResourceFeedbackRequest(BaseModel):
+    resource_id: str
+    action: Literal["neutral", "favorite", "hidden"]
+
+
+class ChatAndGenerateRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    regenerate_resources: bool = True
+    resource_types: list[str] = Field(default_factory=list)
+
+
+class ResourceAdjustRequest(BaseModel):
+    resource_id: str | None = None
+    adjustments: list[dict[str, Any]] = Field(default_factory=list)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    target_concepts: list[str] = Field(default_factory=list)
+
+
+class IncrementalUpdateResponse(BaseModel):
+    ok: bool = True
+    profile_updated: bool = False
+    resources_updated: bool = False
+    learning_path_updated: bool = False
+    message: str = ""
+    updated_profile: Profile | None = None
+    updated_resources: list[Resource] = Field(default_factory=list)
+    updated_learning_path: LearningPath | None = None
 
 
 class AssessmentReport(BaseModel):

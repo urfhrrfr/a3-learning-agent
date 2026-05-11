@@ -1,5 +1,10 @@
-class MockLLMProvider:
+from .base import BaseLLMProvider
+
+
+class MockLLMProvider(BaseLLMProvider):
     """Deterministic provider used when no real model key is configured."""
+
+    name = "mock"
 
     def complete(self, prompt: str) -> str:
         if "画像" in prompt:

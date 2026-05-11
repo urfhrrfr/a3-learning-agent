@@ -33,3 +33,24 @@ def load_records(kind: str) -> list[dict[str, Any]]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute("SELECT payload FROM records WHERE kind = ?", (kind,)).fetchall()
     return [json.loads(row[0]) for row in rows]
+
+
+def load_latest_record(kind: str) -> dict[str, Any] | None:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT payload FROM records WHERE kind = ? ORDER BY rowid DESC LIMIT 1",
+            (kind,),
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def delete_records(kind: str, record_ids: list[str] | None = None) -> None:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        if record_ids is None:
+            conn.execute("DELETE FROM records WHERE kind = ?", (kind,))
+        elif record_ids:
+            placeholders = ",".join("?" for _ in record_ids)
+            conn.execute(f"DELETE FROM records WHERE kind = ? AND id IN ({placeholders})", (kind, *record_ids))
+        conn.commit()

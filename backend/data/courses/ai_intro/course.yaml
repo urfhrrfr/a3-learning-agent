@@ -19,3 +19,6 @@ code_cases:
   - { id: case_astar, title: A* 搜索路径规划, file: examples/search_a_star.py }
   - { id: case_classifier, title: 鸢尾花分类器与评估指标, file: examples/ml_classification.py }
   - { id: case_rag, title: 本地资料检索增强问答, file: examples/local_rag_demo.py }
+  - { id: case_nlp_eval, title: 客服意图识别与错误分析, file: examples/nlp_intent_eval.py }
+  - { id: case_cv_aug, title: 图像增强对识别稳定性的影响, file: examples/cv_augmentation_demo.py }
+  - { id: case_rl_bandit, title: 多臂老虎机策略对比实验, file: examples/rl_bandit_demo.py }

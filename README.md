@@ -38,7 +38,34 @@ npm run dev
 
 ## 当前状态
 
-- Milestone 1-3：后端 API、MockLLMProvider、多智能体 Orchestrator 已实现。
-- Milestone 4：人工智能导论 12 章知识库和 60 道题目草案已准备。
-- Milestone 5-7：前端核心页面、组件、资源展示、路径和评估闭环已实现。
-- Milestone 8：交付文档、PPT 大纲和 7 分钟演示脚本已准备。
+- 后端 API、MockLLMProvider、多智能体 Orchestrator、SQLite 状态恢复已实现。
+- 人工智能导论 12 章知识库和 60 道题目草案已准备。
+- 前端核心页面、资源展示、Agent Trace、学习路径、辅导和评估闭环已实现。
+- 前端已补充全局状态、空状态、错误状态、公共资源渲染组件和 Mermaid 按需加载。
+- 交付文档、PPT 大纲、7 分钟演示脚本、答辩 Runbook 已准备。
+
+## 演示交付材料
+
+- 演示 Runbook：`docs/delivery/demo-runbook.md`
+- 7 分钟视频脚本：`docs/delivery/demo-video-script.md`
+- PPT 大纲：`docs/delivery/ppt-outline.md`
+- 答辩手册：`docs/delivery/presentation-and-defense-guide.md`
+- 最终检查清单：`docs/delivery/final-checklist.md`
+- API 接口契约：`docs/api-contract.md`
+- LLM Provider 接入说明：`docs/llm-provider.md`
+
+## 验证命令
+
+后端：
+
+```bash
+cd backend
+.\.venv\Scripts\python.exe -m pytest tests -p no:cacheprovider
+```
+
+前端：
+
+```bash
+cd frontend
+npm run build
+```
