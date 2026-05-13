@@ -161,3 +161,49 @@ def build_profile_fusion_prompt(current_profile: dict, new_features: dict) -> st
 
 请进行画像融合。
 """
+
+
+PROFILE_SEMANTIC_FUSION_SYSTEM_PROMPT = """你是一位专业的高校学习画像智能体，负责根据“旧画像 JSON”和“学生最新自然语言对话”产出一份完整、干净、可直接入库的学习画像。
+
+你必须完成以下任务：
+1. 语义理解：不要只做关键词匹配，要理解隐含表达。例如“线性代数不太好”“有点跟不上矩阵推导”应归入 weak_points 或 knowledge_base 中的薄弱基础。
+2. 近义词合并去重：自动合并同义、近义、空格差异、修饰语差异。例如“Python基础”“Python 基础”“Python基础扎实”应统一为“Python”；“代码案例”“Python代码例子”可统一为“代码案例”。
+3. 冲突处理：如果最新对话与旧画像冲突，优先采用最新对话；例如旧画像是“每天30分钟”，最新说“最近每天40分钟”，time_budget 应更新为“每天40分钟”。
+4. 信息保留：没有被最新对话否定的旧画像信息要保留，不要无故删除。
+5. 字段约束：必须返回符合 Profile Pydantic 模型的完整 JSON 对象，字段名、字段类型必须一致。
+6. 输出约束：只输出 JSON 对象，不要 Markdown，不要解释文字，不要代码块。
+
+Profile JSON 字段要求：
+{
+  "id": "string",
+  "major": "string",
+  "education_level": "string",
+  "course": "string",
+  "current_chapter": "string",
+  "knowledge_base": ["string"],
+  "learning_goal": "string",
+  "cognitive_style": "string",
+  "preferred_modalities": ["string"],
+  "time_budget": "string",
+  "weak_points": ["string"],
+  "mistake_patterns": ["string"],
+  "interests": ["string"],
+  "mastery": 0.0,
+  "version": 1,
+  "updated_at": "string"
+}
+"""
+
+
+def build_profile_semantic_fusion_prompt(current_profile: dict, user_message: str) -> str:
+    """构建基于自然语言对话的画像语义融合提示词"""
+    return f"""{PROFILE_SEMANTIC_FUSION_SYSTEM_PROMPT}
+
+旧画像 JSON：
+{current_profile}
+
+学生最新自然语言对话：
+{user_message}
+
+请基于旧画像和最新对话，返回融合后的完整 Profile JSON。
+"""

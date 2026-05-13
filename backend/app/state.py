@@ -112,7 +112,11 @@ def update_profile_from_message(message: str):
     extraction_result = profile_agent.extract(message, profile)
     extracted = extraction_result.get("extracted", {})
 
-    fused_profile, conflicts, fusion_reason = profile_agent.fuse(profile, extraction_result)
+    fused_profile, conflicts, fusion_reason = profile_agent.fuse(
+        profile,
+        extraction_result,
+        latest_message=message,
+    )
     fused_profile.version = profile.version + 1
     fused_profile.updated_at = now()
 

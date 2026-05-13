@@ -8,7 +8,7 @@ from uuid import uuid4
 os.environ.setdefault("LLM_PROVIDER", "mock")
 
 from app import state, storage
-from app.agents import ReviewAgent, WorkflowState
+from app.agents import KnowledgeAgent, ProfileAgent, ReviewAgent, WorkflowState
 from app.knowledge import COURSE, question_bank
 from app.main import app
 from app.path_planner import PathPlanner
@@ -16,10 +16,39 @@ from app.providers.factory import get_llm_provider
 from app.providers.mock_llm import MockLLMProvider
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.spark_llm import SparkLLMProvider
-from app.schemas import Resource
+from app.schemas import GenerateRequest, Profile, Resource
 
 
 client = TestClient(app)
+
+
+class SemanticFusionLLM(MockLLMProvider):
+    name = "semantic-test"
+
+    def complete(self, prompt: str) -> str:
+        assert "旧画像 JSON" in prompt
+        assert "学生最新自然语言对话" in prompt
+        return json.dumps(
+            {
+                "id": "student_demo",
+                "major": "计算机科学与技术",
+                "education_level": "本科二年级",
+                "course": "人工智能导论",
+                "current_chapter": "机器学习基础",
+                "knowledge_base": ["Python"],
+                "learning_goal": "完成课程项目",
+                "cognitive_style": "例子驱动",
+                "preferred_modalities": ["代码案例"],
+                "time_budget": "每天40分钟",
+                "weak_points": ["线性代数"],
+                "mistake_patterns": [],
+                "interests": ["机器学习应用"],
+                "mastery": 0.42,
+                "version": 99,
+                "updated_at": "should-be-preserved",
+            },
+            ensure_ascii=False,
+        )
 
 
 def payload(response):
@@ -151,6 +180,32 @@ def test_profile_chat_updates_profile():
     assert "代码案例" in data["profile"]["preferred_modalities"]
 
 
+def test_profile_fuse_uses_llm_semantic_profile_json():
+    current = state.Profile(
+        knowledge_base=["Python基础", "Python 基础"],
+        learning_goal="通过期末考试",
+        preferred_modalities=["图解"],
+        time_budget="每天30分钟",
+        weak_points=[],
+        updated_at=state.now(),
+    )
+    agent = ProfileAgent(SemanticFusionLLM())
+
+    fused, conflicts, reasoning = agent.fuse(
+        current,
+        latest_message="Python还可以，但线性代数不太好，最近每天大概能学40分钟，希望做课程项目。",
+    )
+
+    assert fused.knowledge_base == ["Python"]
+    assert fused.learning_goal == "完成课程项目"
+    assert fused.time_budget == "每天40分钟"
+    assert "线性代数" in fused.weak_points
+    assert fused.version == current.version
+    assert fused.updated_at == current.updated_at
+    assert "LLM语义融合完成" in reasoning
+    assert set(conflicts) >= {"knowledge_base", "learning_goal", "time_budget", "weak_points"}
+
+
 def test_generation_returns_resources_and_trace():
     data = payload(
         client.post(
@@ -190,6 +245,31 @@ def test_generation_returns_resources_and_trace():
     assert "分镜脚本" in media_script
     assert "| 时间 | 画面 | 旁白 | 屏幕文字 |" in media_script
     assert "思考题" in code_case
+
+
+def test_knowledge_agent_reranks_sources_with_profile_context():
+    profile = Profile(
+        learning_goal="理解泛化与过拟合",
+        weak_points=["过拟合", "公式迁移"],
+        mistake_patterns=["概念混淆"],
+        updated_at=state.now(),
+    )
+    request = GenerateRequest(
+        course="人工智能导论",
+        chapter="机器学习基础",
+        goal="理解泛化与过拟合",
+        pain_points=["公式迁移"],
+    )
+    workflow_state = WorkflowState("job_knowledge_test", request, profile)
+    workflow_state.current_query = "为什么训练集表现很好，但新数据效果很差？"
+
+    result = KnowledgeAgent(MockLLMProvider()).run(workflow_state)
+
+    assert "语义检索到" in result["summary"]
+    assert 3 <= len(workflow_state.sources) <= 5
+    assert all({"id", "text", "relevance_score"} <= set(item) for item in workflow_state.sources)
+    assert all(0 <= item["relevance_score"] <= 1 for item in workflow_state.sources)
+    assert any("过拟合" in item["text"] or "泛化" in item["text"] for item in workflow_state.sources)
 
 
 def test_quiz_submit_creates_assessment_and_path():

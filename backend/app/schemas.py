@@ -57,7 +57,7 @@ class AgentTrace(BaseModel):
     collaboration_stage: str = ""
     boundary: str = ""
     depends_on: list[str] = Field(default_factory=list)
-    source_refs: list[str] = Field(default_factory=list)
+    source_refs: list[Any] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     confidence: float = 0.8
     retry_count: int = 0

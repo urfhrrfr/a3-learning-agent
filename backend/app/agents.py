@@ -5,10 +5,13 @@ import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from .knowledge import find_chapter
+from .knowledge import COURSE, find_chapter
 from .providers.base import BaseLLMProvider, LLMProviderError
 from .providers.factory import get_llm_provider
-from .prompts import build_profile_extraction_prompt, build_profile_fusion_prompt
+from .prompts import (
+    build_profile_extraction_prompt,
+    build_profile_semantic_fusion_prompt,
+)
 from .assessment_prompts import build_assessment_prompt, build_review_fact_check_prompt
 from .schemas import AgentTrace, GenerateRequest, Profile, Resource
 
@@ -54,7 +57,7 @@ class WorkflowState:
         self.request = request
         self.profile = profile
         self.chapter = find_chapter(request.chapter)
-        self.sources = [f"{self.chapter['id']}#overview", f"{self.chapter['id']}#practice"]
+        self.sources: list[str | dict] = [f"{self.chapter['id']}#overview", f"{self.chapter['id']}#practice"]
         self.resources: list[Resource] = []
         self.traces: list[AgentTrace] = []
         self.plan: list[str] = []
@@ -116,6 +119,7 @@ class Agent:
         trace.output_summary = result.get("summary", f"{self.name} 已完成" if trace.status == "completed" else f"{self.name} 执行失败")
         trace.warnings = [*trace.warnings, *result.get("warnings", [])]
         trace.confidence = result.get("confidence", trace.confidence if trace.status == "completed" else 0.35)
+        trace.source_refs = list(state.sources)
         trace.arbitration_note = result.get("arbitration_note", "")
         trace.review_conclusion = result.get("review_conclusion", "")
         trace.finished_at = now()
@@ -148,15 +152,8 @@ class ProfileAgent(Agent):
 
     def _extract_json_from_response(self, text: str) -> dict | None:
         """从 LLM 响应中提取 JSON"""
-        text = text.strip()
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', text)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            json_str = text
-
         try:
-            return json.loads(json_str)
+            return parse_llm_json(text)
         except json.JSONDecodeError:
             return None
 
@@ -219,8 +216,10 @@ class ProfileAgent(Agent):
         time_match = re.search(r'每天[^\d]*(\d+)', message_lower)
         if time_match:
             extracted["time_budget"] = f"每天{time_match.group(1)}分钟"
-        elif re.search(r'每周[^\d]*(\d+)', message_lower):
-            extracted["time_budget"] = f"每周{time_match.group(1)}小时"
+        else:
+            weekly_match = re.search(r'每周[^\d]*(\d+)', message_lower)
+            if weekly_match:
+                extracted["time_budget"] = f"每周{weekly_match.group(1)}小时"
 
         if "教育" in message_lower:
             extracted["interests"].append("智能教育")
@@ -269,7 +268,7 @@ class ProfileAgent(Agent):
         merged = []
         seen = set()
         for item in new + current:
-            item_norm = item.strip().lower()
+            item_norm = re.sub(r"\s+", "", item.strip().lower())
             if item_norm and item_norm not in seen:
                 seen.add(item_norm)
                 merged.append(item)
@@ -290,10 +289,68 @@ class ProfileAgent(Agent):
                 return True, f"{field}: '{current}' -> '{new}'"
         return False, ""
 
-    def fuse(self, current_profile: Profile, extracted: dict) -> tuple[Profile, list[str], str]:
-        """融合新抽取的特征到已有画像"""
+    def _diff_profile_fields(self, before: Profile, after: Profile) -> list[str]:
+        fields = [
+            "knowledge_base",
+            "learning_goal",
+            "cognitive_style",
+            "preferred_modalities",
+            "weak_points",
+            "mistake_patterns",
+            "time_budget",
+            "interests",
+            "mastery",
+        ]
+        before_dict = before.model_dump()
+        after_dict = after.model_dump()
+        return [field for field in fields if before_dict.get(field) != after_dict.get(field)]
+
+    def _semantic_fuse_with_llm(self, current_profile: Profile, latest_message: str) -> tuple[Profile, list[str], str] | None:
+        if not latest_message.strip() or self.llm.name == "mock":
+            return None
+
+        prompt = build_profile_semantic_fusion_prompt(
+            current_profile.model_dump(),
+            latest_message,
+        )
+        response = self.llm.complete(prompt)
+        data = self._extract_json_from_response(response)
+        if not isinstance(data, dict):
+            return None
+
+        if "profile" in data and isinstance(data["profile"], dict):
+            data = data["profile"]
+        elif "fused" in data and isinstance(data["fused"], dict):
+            data = data["fused"]
+
+        merged = current_profile.model_dump()
+        merged.update(data)
+        merged["id"] = current_profile.id
+        merged["version"] = current_profile.version
+        merged["updated_at"] = current_profile.updated_at
+
+        fused_profile = Profile(**merged)
+        changed_fields = self._diff_profile_fields(current_profile, fused_profile)
+        reasoning = "LLM语义融合完成：已根据最新对话进行近义词合并、隐含语义理解和冲突处理"
+        return fused_profile, changed_fields, reasoning
+
+    def fuse(
+        self,
+        current_profile: Profile,
+        extracted: dict | None = None,
+        latest_message: str = "",
+    ) -> tuple[Profile, list[str], str]:
+        """融合画像；优先使用 LLM 基于最新自然语言对话做语义融合。"""
+        if latest_message:
+            try:
+                semantic_result = self._semantic_fuse_with_llm(current_profile, latest_message)
+                if semantic_result is not None:
+                    return semantic_result
+            except (LLMProviderError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+
         current_dict = current_profile.model_dump()
-        extracted_features = extracted.get("extracted", {})
+        extracted_features = (extracted or {}).get("extracted", {})
         conflicts = []
 
         for field in ["knowledge_base", "preferred_modalities", "weak_points", "mistake_patterns", "interests"]:
@@ -330,17 +387,208 @@ class KnowledgeAgent(Agent):
     stage = "knowledge"
     boundary = "只负责检索与证据整理，不直接生成学习资源"
     depends_on = ["ProfileAgent"]
+    max_candidates = 12
+    top_k = 5
+
+    section_labels = {
+        "objectives": "学习目标",
+        "concept_cards": "概念卡片",
+        "detailed_concepts": "详细知识点",
+        "difficulties": "学习难点",
+        "misconceptions": "常见误区",
+        "real_cases": "真实案例",
+        "code_labs": "代码实验",
+        "practice_questions": "练习题",
+        "reading": "拓展阅读",
+        "task": "实践任务",
+    }
+
+    def _current_query(self, state: WorkflowState) -> str:
+        explicit_query = getattr(state, "current_query", "") or getattr(state.request, "current_query", "")
+        if explicit_query:
+            return str(explicit_query)
+        pain_points = "、".join(state.request.pain_points or [])
+        return f"{state.request.chapter}；学习目标：{state.request.goal}；当前困惑：{pain_points}".strip("；")
+
+    @staticmethod
+    def _stringify_item(item) -> str:
+        if isinstance(item, dict):
+            parts = []
+            for key in ["name", "definition", "why_it_matters", "example", "check_question", "stem", "standard_answer", "explanation", "assessment_point"]:
+                value = item.get(key)
+                if value:
+                    parts.append(str(value))
+            if item.get("rubric"):
+                parts.append("评价标准：" + "；".join(str(value) for value in item["rubric"]))
+            return "；".join(parts)
+        return str(item)
+
+    def _candidate_fragments(self, state: WorkflowState) -> list[dict]:
+        candidates: list[dict] = []
+        for chapter in COURSE["chapters"]:
+            for section, label in self.section_labels.items():
+                raw_value = chapter.get(section)
+                if not raw_value:
+                    continue
+                items = raw_value if isinstance(raw_value, list) else [raw_value]
+                for index, item in enumerate(items, start=1):
+                    text = self._stringify_item(item)
+                    if not text:
+                        continue
+                    candidates.append(
+                        {
+                            "id": f"{chapter['id']}#{section}:{index:02d}",
+                            "chapter_id": chapter["id"],
+                            "chapter_title": chapter["title"],
+                            "section": section,
+                            "section_label": label,
+                            "text": text,
+                        }
+                    )
+        return candidates
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", text.lower())
+        stop_words = {"学习", "目标", "当前", "章节", "知识", "理解", "掌握", "案例"}
+        return [token for token in tokens if token not in stop_words]
+
+    def _profile_context(self, state: WorkflowState) -> str:
+        profile = state.profile
+        weak_points = "、".join(getattr(profile, "weak_points", []) or [])
+        mistake_patterns = "、".join(getattr(profile, "mistake_patterns", []) or [])
+        knowledge_base = "、".join(getattr(profile, "knowledge_base", []) or [])
+        return (
+            f"学习目标：{getattr(profile, 'learning_goal', '')}\n"
+            f"薄弱点：{weak_points}\n"
+            f"常见错误模式：{mistake_patterns}\n"
+            f"已有基础：{knowledge_base}\n"
+            f"偏好：{getattr(profile, 'cognitive_style', '')}，{'、'.join(getattr(profile, 'preferred_modalities', []) or [])}"
+        )
+
+    def _lexical_score(self, fragment: dict, query: str, profile_context: str, current_chapter_id: str) -> float:
+        intent_tokens = set(self._tokenize(f"{query}\n{profile_context}"))
+        fragment_tokens = set(self._tokenize(f"{fragment['chapter_title']} {fragment['section_label']} {fragment['text']}"))
+        if not intent_tokens:
+            return 0.2
+        overlap = len(intent_tokens & fragment_tokens) / max(len(intent_tokens), 1)
+        chapter_boost = 0.2 if fragment["chapter_id"] == current_chapter_id else 0.0
+        weakness_boost = 0.15 if any(token in fragment["text"].lower() for token in intent_tokens) else 0.0
+        section_boost = 0.1 if fragment["section"] in {"misconceptions", "difficulties", "practice_questions", "code_labs"} else 0.0
+        return min(1.0, 0.2 + overlap + chapter_boost + weakness_boost + section_boost)
+
+    def _prefilter_candidates(self, state: WorkflowState, query: str, profile_context: str) -> list[dict]:
+        candidates = self._candidate_fragments(state)
+        for candidate in candidates:
+            candidate["_prefilter_score"] = self._lexical_score(candidate, query, profile_context, state.chapter["id"])
+        return sorted(candidates, key=lambda item: item["_prefilter_score"], reverse=True)[: self.max_candidates]
+
+    def _build_rerank_prompt(self, query: str, profile_context: str, candidates: list[dict]) -> str:
+        candidate_text = "\n\n".join(
+            (
+                f"[{idx}] id={item['id']}\n"
+                f"章节={item['chapter_title']}；类型={item['section_label']}\n"
+                f"片段={item['text']}"
+            )
+            for idx, item in enumerate(candidates, start=1)
+        )
+        return f"""你是课程知识库的相关性裁判（Reranker）。
+请根据“用户当前提问”和“学生画像”从候选知识片段中挑出最应该召回的 3-5 个片段。
+
+排序标准：
+1. 直接回答用户当前提问。
+2. 优先覆盖学生薄弱点和常见错误模式。
+3. 优先选择可支撑后续讲解、练习或代码实验的片段。
+4. 不要编造候选列表外的 id。
+
+用户当前提问：
+{query}
+
+学生画像：
+{profile_context}
+
+候选知识片段：
+{candidate_text}
+
+只输出 JSON 数组，每个元素格式如下：
+{{"id": "候选片段 id", "relevance_score": 0.0, "reason": "一句话说明为什么相关"}}
+"""
+
+    def _normalize_rerank_result(self, raw_result, candidates_by_id: dict[str, dict]) -> list[dict]:
+        if isinstance(raw_result, dict):
+            raw_items = raw_result.get("results", [])
+        elif isinstance(raw_result, list):
+            raw_items = raw_result
+        else:
+            raw_items = []
+
+        selected: list[dict] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            fragment_id = str(item.get("id", ""))
+            if fragment_id not in candidates_by_id or fragment_id in seen:
+                continue
+            try:
+                score = float(item.get("relevance_score", 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            fragment = candidates_by_id[fragment_id]
+            selected.append(
+                {
+                    "id": fragment_id,
+                    "text": fragment["text"],
+                    "relevance_score": round(min(max(score, 0.0), 1.0), 2),
+                    "chapter_title": fragment["chapter_title"],
+                    "section": fragment["section"],
+                    "reason": str(item.get("reason", "")),
+                }
+            )
+            seen.add(fragment_id)
+            if len(selected) >= self.top_k:
+                break
+        return selected
+
+    def _fallback_rerank(self, candidates: list[dict]) -> list[dict]:
+        selected = []
+        for item in sorted(candidates, key=lambda candidate: candidate.get("_prefilter_score", 0), reverse=True)[: self.top_k]:
+            selected.append(
+                {
+                    "id": item["id"],
+                    "text": item["text"],
+                    "relevance_score": round(float(item.get("_prefilter_score", 0.5)), 2),
+                    "chapter_title": item["chapter_title"],
+                    "section": item["section"],
+                    "reason": "基于当前提问、薄弱点与章节关键词的轻量规则排序命中。",
+                }
+            )
+        return selected
 
     def run(self, state: WorkflowState) -> dict:
-        state.sources = [
-            f"{state.chapter['id']}#objectives",
-            f"{state.chapter['id']}#detailed_concepts",
-            f"{state.chapter['id']}#misconceptions",
-            f"{state.chapter['id']}#real_cases",
-            f"{state.chapter['id']}#code_labs",
-            f"{state.chapter['id']}#practice_questions",
-        ]
-        return {"summary": f"检索到 {state.chapter['title']} 的详细知识点、误区、案例、代码实验与题库"}
+        query = self._current_query(state)
+        profile_context = self._profile_context(state)
+        candidates = self._prefilter_candidates(state, query, profile_context)
+        candidates_by_id = {item["id"]: item for item in candidates}
+        selected: list[dict] = []
+        warnings: list[str] = []
+
+        prompt = self._build_rerank_prompt(query, profile_context, candidates)
+        try:
+            selected = self._normalize_rerank_result(parse_llm_json(self.llm.complete(prompt)), candidates_by_id)
+        except (json.JSONDecodeError, LLMProviderError, Exception) as exc:  # noqa: BLE001
+            warnings.append(f"LLM rerank 不可用，已使用本地轻量排序兜底: {exc}")
+
+        if not selected:
+            selected = self._fallback_rerank(candidates)
+
+        state.sources = selected
+        avg_score = sum(item["relevance_score"] for item in selected) / max(len(selected), 1)
+        return {
+            "summary": f"语义检索到 {len(selected)} 个与“{query}”最相关的知识片段",
+            "confidence": round(avg_score, 2),
+            "warnings": warnings,
+        }
 
 
 class PlannerAgent(Agent):
