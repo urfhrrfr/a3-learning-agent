@@ -10,14 +10,28 @@ import type {
   ProfileChatResponse,
   ProfileDimension,
   Resource,
+  TutorMessage,
+  TutorExercise,
+  TutorExerciseResult,
   TutorResponse
 } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
+const USER_ID_STORAGE_KEY = 'a3_learning_user_id'
+
+function userId() {
+  let existing = localStorage.getItem(USER_ID_STORAGE_KEY)
+  if (!existing) {
+    const randomId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(16).slice(2)}`
+    existing = `anon_${randomId}`
+    localStorage.setItem(USER_ID_STORAGE_KEY, existing)
+  }
+  return existing
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options?.headers || {}) },
+    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId(), ...(options?.headers || {}) },
     ...options
   })
 
@@ -35,12 +49,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<HealthStatus>('/api/health'),
   profile: () => request<Profile>('/api/profile/current'),
+  profileVersions: () => request<Profile[]>('/api/profile/versions'),
+  rollbackProfile: (version: number) =>
+    request<{ profile: Profile; learning_path: LearningPath | null }>(`/api/profile/rollback/${version}`, { method: 'POST' }),
   profileDimensions: () => request<ProfileDimension[]>('/api/profile/dimensions'),
   profileChangeLog: () => request<ProfileChangeLog[]>('/api/profile/change-log'),
   profileChat: (message: string) =>
     request<ProfileChatResponse>('/api/profile/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   profileChatAndGenerate: (message: string) =>
-    request<{ profile: Profile; resources: Resource[]; learning_path: LearningPath | null; message: string }>('/api/profile/chat-and-generate', { 
+    request<ProfileChatResponse & { resources: Resource[]; learning_path: LearningPath | null; message: string }>('/api/profile/chat-and-generate', { 
       method: 'POST', 
       body: JSON.stringify({ message, regenerate_resources: true }) 
     }),
@@ -59,8 +76,18 @@ export const api = {
     }),
   path: () => request<LearningPath>('/api/learning-path/current'),
   generatePath: () => request<LearningPath>('/api/learning-path/generate', { method: 'POST' }),
-  tutor: (question: string, resource_id?: string | null) =>
-    request<TutorResponse>('/api/tutor/chat', { method: 'POST', body: JSON.stringify({ question, resource_id }) }),
+  tutor: (question: string, resource_id?: string | null, history: TutorMessage[] = []) =>
+    request<TutorResponse>('/api/tutor/chat', { method: 'POST', body: JSON.stringify({ question, resource_id, history }) }),
+  confirmWeakPoint: (topic: string, evidence = '') =>
+    request<{ profile: Profile; profile_updated: boolean }>('/api/profile/weak-points/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ topic, evidence })
+    }),
+  submitTutorExercise: (exercise: TutorExercise, answer: string) =>
+    request<TutorExerciseResult>('/api/tutor/exercise/submit', {
+      method: 'POST',
+      body: JSON.stringify({ exercise, answer })
+    }),
   refreshQuiz: () => request<Resource>('/api/quiz/refresh', { method: 'POST' }),
   submitQuiz: (answers: string[], resource_id?: string | null) =>
     request<AssessmentReport>('/api/quiz/submit', { method: 'POST', body: JSON.stringify({ answers, resource_id }) }),

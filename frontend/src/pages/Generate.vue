@@ -83,6 +83,10 @@
         </section>
 
         <GenerationProgress :progress="store.progress" :loading="store.loading" :current-step="store.currentStep" />
+        <LearningItineraryCard
+          :plan-summary="store.planSummary"
+          :time-budget="store.profile?.time_budget"
+        />
 
         <section class="panel result-panel">
           <div class="panel-title">
@@ -181,6 +185,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useLearningStore } from '../store'
 import type { Resource } from '../types'
 import GenerationProgress from '../components/GenerationProgress.vue'
+import LearningItineraryCard from '../components/LearningItineraryCard.vue'
 import AgentTraceTimeline from '../components/AgentTraceTimeline.vue'
 import ResourceCard from '../components/ResourceCard.vue'
 import ResourceContent from '../components/ResourceContent.vue'
@@ -226,8 +231,9 @@ onMounted(async () => {
 
 function hydrateDraft() {
   if (draftPrompt.value) return
-  const chapter = store.profile?.current_chapter || '机器学习基础'
-  const goal = store.profile?.learning_goal || '掌握核心概念'
+  const chapter = store.profile?.current_chapter
+  const goal = store.profile?.learning_goal
+  if (!chapter && !goal) return
   draftPrompt.value = `围绕「${chapter}」生成个性化学习资源，目标是${goal}。`
 }
 
@@ -241,7 +247,7 @@ function resetDraft() {
 
 async function submitGeneration() {
   if (!canSubmit.value) return
-  await store.generateResources(selectedResourceTypes())
+  await store.generateResources(selectedResourceTypes(), draftPrompt.value)
   selected.value = store.resources[0] || null
   showToast(store.resources.length ? '资源生成完成' : '任务完成，但暂无结果')
 }

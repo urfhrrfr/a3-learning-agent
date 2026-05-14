@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from datetime import datetime, timezone
 from threading import Thread
 from uuid import uuid4
@@ -20,15 +21,19 @@ from .schemas import (
     Resource,
     ResourceAdjustRequest,
     ResourceFeedbackRequest,
+    PlanDecision,
+    PlanSummary,
 )
 from .storage import delete_records, load_latest_record, load_records, save_record
 
 
 profile = Profile(updated_at=now())
+profiles: dict[str, Profile] = {}
 jobs: dict[str, GenerationJob] = {}
 resources = []
 learning_path: LearningPath | None = None
 assessment_report: AssessmentReport | None = None
+DEFAULT_USER_ID = "student_demo"
 
 
 PROFILE_DIMENSIONS = [
@@ -101,28 +106,76 @@ def persist_job(job: GenerationJob) -> None:
     save_record("job", job.id, job.model_dump())
 
 
-def update_profile_from_message(message: str):
+def build_plan_summary(plan_details: list[dict]) -> PlanSummary:
+    decisions = [
+        PlanDecision(
+            resource_type=str(item.get("type", "")),
+            priority=float(item.get("priority", 0.0)),
+            difficulty=str(item.get("difficulty", "")),
+            reason=str(item.get("reason", "")),
+        )
+        for item in plan_details
+        if item.get("type")
+    ]
+    total_estimated_time = sum(int(item.get("estimated_minutes", 0) or 0) for item in plan_details)
+    return PlanSummary(total_estimated_time=total_estimated_time, decisions=decisions)
+
+
+def normalize_user_id(user_id: str | None = None) -> str:
+    raw = (user_id or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
+    return re.sub(r"[^a-zA-Z0-9_.:-]", "_", raw)[:80]
+
+
+def get_profile(user_id: str | None = None) -> Profile:
     global profile
+
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        return profile
+    if resolved_user_id in profiles:
+        return profiles[resolved_user_id]
+
+    stored = next((item for item in load_records("profile") if item.get("id") == resolved_user_id), None)
+    profiles[resolved_user_id] = Profile(**stored) if stored else Profile(id=resolved_user_id, updated_at=now())
+    return profiles[resolved_user_id]
+
+
+def set_profile_for_user(user_id: str | None, next_profile: Profile) -> None:
+    global profile
+
+    resolved_user_id = normalize_user_id(user_id)
+    next_profile.id = resolved_user_id
+    if resolved_user_id == DEFAULT_USER_ID:
+        profile = next_profile
+    else:
+        profiles[resolved_user_id] = next_profile
+    save_record("profile", resolved_user_id, next_profile.model_dump())
+
+
+def update_profile_from_message(message: str, user_id: str | None = None):
     from .providers.factory import get_llm_provider
     llm = get_llm_provider()
     profile_agent = ProfileAgent(llm)
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
 
-    before = profile.model_dump()
+    before = current_profile.model_dump()
 
-    extraction_result = profile_agent.extract(message, profile)
+    extraction_result = profile_agent.extract(message, current_profile)
     extracted = extraction_result.get("extracted", {})
 
     fused_profile, conflicts, fusion_reason = profile_agent.fuse(
-        profile,
+        current_profile,
         extraction_result,
         latest_message=message,
     )
-    fused_profile.version = profile.version + 1
+    fusion_meta = profile_agent.last_fusion_meta
+    fused_profile.version = current_profile.version + 1
     fused_profile.updated_at = now()
 
-    profile = fused_profile
-    save_record("profile", profile.id, profile.model_dump())
-    after = profile.model_dump()
+    set_profile_for_user(resolved_user_id, fused_profile)
+    save_record("profile_version", f"{resolved_user_id}_v{fused_profile.version}", fused_profile.model_dump())
+    after = fused_profile.model_dump()
 
     changes = {}
     tracked_fields = [
@@ -141,18 +194,19 @@ def update_profile_from_message(message: str):
 
     save_record(
         "profile_change",
-        f"profile_change_{uuid4().hex[:10]}",
+        f"{resolved_user_id}_profile_change_{uuid4().hex[:10]}",
         {
-            "profile_id": profile.id,
-            "version": profile.version,
+            "profile_id": resolved_user_id,
+            "version": fused_profile.version,
             "trigger_message": message,
             "extracted": extracted,
             "conflicts": conflicts,
             "fusion_reason": fusion_reason,
+            "fusion_meta": fusion_meta,
             "extraction_confidence": extraction_result.get("confidence", 0.5),
             "extraction_source": extraction_result.get("source", "fallback"),
             "changed_fields": changes,
-            "updated_at": profile.updated_at,
+            "updated_at": fused_profile.updated_at,
         },
     )
 
@@ -163,7 +217,154 @@ def update_profile_from_message(message: str):
         "reasoning": extraction_result.get("reasoning", ""),
         "conflicts": conflicts,
         "fusion_reason": fusion_reason,
+        "fusion_meta": fusion_meta,
         "changed_fields": changes
+    }
+
+
+def add_profile_weak_point(topic: str, evidence: str = "", user_id: str | None = None) -> dict:
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
+    normalized_topic = topic.strip()
+    before = current_profile.model_dump()
+
+    changed = bool(normalized_topic and normalized_topic not in current_profile.weak_points)
+    if changed:
+        current_profile.weak_points.append(normalized_topic)
+        current_profile.version += 1
+        current_profile.updated_at = now()
+        set_profile_for_user(resolved_user_id, current_profile)
+        save_record("profile_version", f"{resolved_user_id}_v{current_profile.version}", current_profile.model_dump())
+        save_record(
+            "profile_change",
+            f"{resolved_user_id}_tutor_weak_point_{uuid4().hex[:10]}",
+            {
+                "profile_id": resolved_user_id,
+                "version": current_profile.version,
+                "trigger_message": evidence or f"confirm_weak_point:{normalized_topic}",
+                "extracted": {"weak_points": [normalized_topic]},
+                "conflicts": [],
+                "fusion_reason": f"Tutor 确认加入薄弱点：{normalized_topic}",
+                "fusion_meta": {
+                    "source": "tutor_confirmation",
+                    "changed_fields": ["weak_points"],
+                    "confidence": 0.9,
+                },
+                "extraction_confidence": 0.9,
+                "extraction_source": "tutor_confirmation",
+                "changed_fields": {
+                    "weak_points": {
+                        "before": before.get("weak_points", []),
+                        "after": current_profile.weak_points,
+                    }
+                },
+                "updated_at": current_profile.updated_at,
+            },
+        )
+
+    return {"profile": current_profile.model_dump(), "profile_updated": changed}
+
+
+def evaluate_tutor_exercise(exercise: dict, answer: str, user_id: str | None = None) -> dict:
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
+    before = current_profile.model_dump()
+    topic = str(exercise.get("topic") or "当前问题").strip()
+    expected_keywords = [
+        str(keyword).lower()
+        for keyword in exercise.get("expected_keywords", [])
+        if str(keyword).strip()
+    ]
+    normalized_answer = answer.lower()
+    hits = [keyword for keyword in expected_keywords if keyword and keyword in normalized_answer]
+    enough_detail = len(answer.strip()) >= 36
+
+    if len(hits) >= 2 or (hits and enough_detail):
+        score = 86
+        mastery_delta = 0.04
+        feedback = f"回答抓住了 {topic} 的关键线索：{', '.join(hits[:3])}。下一步可以做迁移应用。"
+    elif hits or len(answer.strip()) >= 20:
+        score = 64
+        mastery_delta = 0.015
+        feedback = f"已经碰到 {topic} 的一部分关键点，但解释还不够完整。建议补上“为什么”和“怎么判断”。"
+    else:
+        score = 38
+        mastery_delta = -0.02
+        feedback = f"这次回答还没有稳定覆盖 {topic} 的核心。建议先回到资源讲解，再用一个小例子重答。"
+
+    current_profile.mastery = max(0.0, min(0.95, current_profile.mastery + mastery_delta))
+    changed_fields = {"mastery": {"before": before.get("mastery"), "after": current_profile.mastery}}
+    if score < 70 and topic and topic not in current_profile.weak_points:
+        current_profile.weak_points.append(topic)
+        changed_fields["weak_points"] = {
+            "before": before.get("weak_points", []),
+            "after": current_profile.weak_points,
+        }
+    if score < 70:
+        mistake = f"Tutor 小练习暴露：{topic}理解不稳"
+        if mistake not in current_profile.mistake_patterns:
+            current_profile.mistake_patterns.append(mistake)
+            changed_fields["mistake_patterns"] = {
+                "before": before.get("mistake_patterns", []),
+                "after": current_profile.mistake_patterns,
+            }
+
+    current_profile.version += 1
+    current_profile.updated_at = now()
+    set_profile_for_user(resolved_user_id, current_profile)
+    save_record("profile_version", f"{resolved_user_id}_v{current_profile.version}", current_profile.model_dump())
+    save_record(
+        "profile_change",
+        f"{resolved_user_id}_tutor_exercise_{uuid4().hex[:10]}",
+        {
+            "profile_id": resolved_user_id,
+            "version": current_profile.version,
+            "trigger_message": f"Tutor 小练习作答：{topic}",
+            "extracted": {"mastery_delta": mastery_delta, "weak_points": [topic] if score < 70 else []},
+            "conflicts": [],
+            "fusion_reason": feedback,
+            "fusion_meta": {
+                "source": "tutor_exercise",
+                "changed_fields": list(changed_fields.keys()),
+                "confidence": 0.82,
+                "score": score,
+            },
+            "extraction_confidence": 0.82,
+            "extraction_source": "tutor_exercise",
+            "changed_fields": changed_fields,
+            "updated_at": current_profile.updated_at,
+        },
+    )
+
+    path = generate_learning_path(
+        f"Tutor 小练习评估后调整：{topic}",
+        {
+            "score": score,
+            "mastery_delta": mastery_delta,
+            "weak_points": current_profile.weak_points,
+            "mistake_patterns": current_profile.mistake_patterns,
+        },
+        current_profile,
+    )
+    next_step = None
+    if path.steps:
+        step = next((item for item in path.steps if item.status != "done"), path.steps[0])
+        next_step = {
+            "title": step.title,
+            "objective": step.objective,
+            "reason": step.reason,
+            "estimated_minutes": step.estimated_minutes,
+            "resource_ids": step.recommended_resource_ids,
+        }
+
+    return {
+        "score": score,
+        "mastery_delta": mastery_delta,
+        "feedback": feedback,
+        "matched_keywords": hits,
+        "profile": current_profile.model_dump(),
+        "learning_path": path.model_dump(),
+        "next_step": next_step,
     }
 
 
@@ -214,6 +415,7 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
         for idx, (agent, workflow_state) in enumerate(orchestrator.generate(job.id, request, profile), start=1):
             job.traces = workflow_state.traces
             job.resources = workflow_state.resources
+            job.plan_summary = build_plan_summary(workflow_state.plan_details)
             job.progress = int(idx / total * 95)
             job.current_step = agent.name
             event(job, "agent_completed", {"agent": agent.name, "progress": job.progress})
@@ -243,10 +445,15 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
     return job
 
 
-def generate_learning_path(reason: str = "基于当前画像生成路径", assessment_context: dict | None = None) -> LearningPath:
+def generate_learning_path(
+    reason: str = "基于当前画像生成路径",
+    assessment_context: dict | None = None,
+    active_profile: Profile | None = None,
+) -> LearningPath:
     global learning_path
     
     planner = PathPlanner()
+    planning_profile = active_profile or profile
     
     resources_list = [
         {
@@ -265,7 +472,7 @@ def generate_learning_path(reason: str = "基于当前画像生成路径", asses
     if assessment_context is None and assessment_report is not None:
         assessment_context = assessment_report.model_dump()
 
-    result = planner.plan(profile, resources_list, assessment_context)
+    result = planner.plan(planning_profile, resources_list, assessment_context)
     
     path_data = result["learning_path"]
     reasoning = result.get("reasoning", reason)
@@ -297,8 +504,8 @@ def generate_learning_path(reason: str = "基于当前画像生成路径", asses
     
     learning_path = LearningPath(
         id=path_data.get("id", f"path_{uuid4().hex[:8]}"),
-        profile_version=path_data.get("profile_version", profile.version),
-        mastery=path_data.get("mastery", profile.mastery),
+        profile_version=path_data.get("profile_version", planning_profile.version),
+        mastery=path_data.get("mastery", planning_profile.mastery),
         adjustment_reason=f"{reason} - {result.get('source', 'unknown')}",
         updated_at=now(),
         steps=steps,
@@ -452,31 +659,117 @@ def hydrate_from_db():
     assessment_report = AssessmentReport(**latest_assessment) if latest_assessment else None
 
 
-def profile_change_log() -> list[dict]:
+def profile_change_log(user_id: str | None = None) -> list[dict]:
+    resolved_user_id = normalize_user_id(user_id)
     logs = load_records("profile_change")
+    logs = [item for item in logs if item.get("profile_id") == resolved_user_id]
     return sorted(logs, key=lambda item: item.get("updated_at", ""), reverse=True)
 
 
-def chat_and_generate(request: ChatAndGenerateRequest):
+def profile_versions(user_id: str | None = None) -> list[dict]:
+    resolved_user_id = normalize_user_id(user_id)
+    versions = load_records("profile_version")
+    versions = [item for item in versions if item.get("id") == resolved_user_id]
+    versions = sorted(versions, key=lambda item: item.get("version", 0), reverse=True)
+    if not versions:
+        return [get_profile(resolved_user_id).model_dump()]
+    current = get_profile(resolved_user_id).model_dump()
+    if not any(item.get("version") == current.get("version") for item in versions):
+        versions.insert(0, current)
+    return versions
+
+
+def rollback_profile_version(version: int, user_id: str | None = None) -> dict | None:
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
+
+    target = next((item for item in profile_versions(resolved_user_id) if item.get("version") == version), None)
+    if target is None:
+        return None
+
+    before = current_profile.model_dump()
+    rolled_back = Profile(**target)
+    rolled_back.updated_at = now()
+    set_profile_for_user(resolved_user_id, rolled_back)
+    save_record("profile_version", f"{resolved_user_id}_v{rolled_back.version}", rolled_back.model_dump())
+
+    changes = {}
+    for field in [
+        "knowledge_base",
+        "learning_goal",
+        "cognitive_style",
+        "preferred_modalities",
+        "weak_points",
+        "mistake_patterns",
+        "time_budget",
+        "interests",
+    ]:
+        if before.get(field) != target.get(field):
+            changes[field] = {"before": before.get(field), "after": target.get(field)}
+
+    save_record(
+        "profile_change",
+        f"{resolved_user_id}_profile_rollback_{uuid4().hex[:10]}",
+        {
+            "profile_id": resolved_user_id,
+            "version": rolled_back.version,
+            "trigger_message": f"rollback_to_v{version}",
+            "extracted": {},
+            "conflicts": [],
+            "fusion_reason": f"已回滚到画像版本 v{version}",
+            "fusion_meta": {
+                "source": "rollback",
+                "changed_fields": list(changes.keys()),
+                "conflicts": [],
+                "merge_reasoning": f"用户确认撤销高风险画像更新，回滚到 v{version}",
+                "confidence": 1.0,
+                "validation": {
+                    "is_valid": True,
+                    "confidence_score": 1.0,
+                    "warnings": [],
+                    "requires_confirmation": False,
+                },
+            },
+            "extraction_confidence": 1.0,
+            "extraction_source": "rollback",
+            "changed_fields": changes,
+            "updated_at": rolled_back.updated_at,
+        },
+    )
+
+    if resolved_user_id == DEFAULT_USER_ID:
+        path = generate_learning_path(f"画像回滚到 v{version}，重新规划学习路径")
+        path_data = path.model_dump()
+    else:
+        path_data = None
+    return {"profile": rolled_back.model_dump(), "learning_path": path_data}
+
+
+def chat_and_generate(request: ChatAndGenerateRequest, user_id: str | None = None):
     global profile, resources, learning_path
+    resolved_user_id = normalize_user_id(user_id)
     
-    profile_result = update_profile_from_message(request.message)
+    profile_result = update_profile_from_message(request.message, resolved_user_id)
+    active_profile = get_profile(resolved_user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        profile = active_profile
     
     result = {
         "profile_updated": True,
         "resources_updated": False,
         "learning_path_updated": False,
         "message": "",
-        "profile": profile.model_dump(),
+        "profile": active_profile.model_dump(),
         "extracted": profile_result.get("extracted", {}),
         "resources": [],
         "learning_path": None,
         "conflicts": profile_result.get("conflicts", []),
         "fusion_reason": profile_result.get("fusion_reason", ""),
+        "fusion_meta": profile_result.get("fusion_meta", {}),
         "changed_fields": profile_result.get("changed_fields", {}),
     }
     
-    if request.regenerate_resources:
+    if request.regenerate_resources and resolved_user_id == DEFAULT_USER_ID:
         resource_types = request.resource_types if request.resource_types else ["lecture_doc", "quiz", "code_case"]
         
         new_resources = regenerate_resources_by_types(resource_types)

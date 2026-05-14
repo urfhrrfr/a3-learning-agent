@@ -6,6 +6,12 @@
 import { computed } from 'vue'
 const props = defineProps<{ content: string }>()
 
+function stripSourceMarkers(value: string) {
+  return value
+    .replace(/\s*\[来源:\s*[^\]]+?\]/g, '')
+    .replace(/\s*\[Source:\s*[^\]]+?\]/gi, '')
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, '&amp;')
@@ -29,7 +35,7 @@ function renderTable(lines: string[]) {
 }
 
 function renderMarkdown(content: string) {
-  const lines = content.split(/\r?\n/)
+  const lines = stripSourceMarkers(content).split(/\r?\n/)
   const output: string[] = []
   let listItems: string[] = []
   let tableLines: string[] = []

@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ApiResponse(BaseModel):
@@ -11,19 +11,19 @@ class ApiResponse(BaseModel):
 
 class Profile(BaseModel):
     id: str = "student_demo"
-    major: str = "计算机科学与技术"
-    education_level: str = "本科二年级"
+    major: str = ""
+    education_level: str = ""
     course: str = "人工智能导论"
-    current_chapter: str = "机器学习基础"
-    knowledge_base: list[str] = Field(default_factory=lambda: ["Python 基础", "线性代数薄弱"])
-    learning_goal: str = "理解机器学习核心概念并完成课程项目"
-    cognitive_style: str = "例子驱动"
-    preferred_modalities: list[str] = Field(default_factory=lambda: ["图解", "代码案例", "短视频"])
-    time_budget: str = "每天 45 分钟"
-    weak_points: list[str] = Field(default_factory=lambda: ["梯度下降", "模型评估指标"])
-    mistake_patterns: list[str] = Field(default_factory=lambda: ["概念混淆", "公式不会迁移"])
-    interests: list[str] = Field(default_factory=lambda: ["智能教育", "机器学习应用"])
-    mastery: float = 0.42
+    current_chapter: str = ""
+    knowledge_base: list[str] = Field(default_factory=list)
+    learning_goal: str = ""
+    cognitive_style: str = ""
+    preferred_modalities: list[str] = Field(default_factory=list)
+    time_budget: str = ""
+    weak_points: list[str] = Field(default_factory=list)
+    mistake_patterns: list[str] = Field(default_factory=list)
+    interests: list[str] = Field(default_factory=list)
+    mastery: float = 0.0
     version: int = 1
     updated_at: str = ""
 
@@ -68,13 +68,21 @@ class AgentTrace(BaseModel):
     finished_at: str | None = None
 
 
+class EvidenceSource(BaseModel):
+    id: str
+    text: str = ""
+    relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
 class Resource(BaseModel):
     id: str
     type: str
     title: str
     content_format: Literal["markdown", "mermaid", "json", "code"]
     content: str
-    source_refs: list[str]
+    evidence_sources: list[EvidenceSource] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     difficulty: str
     target_profile: list[str]
     review_status: Literal["passed", "needs_revision", "blocked"]
@@ -86,6 +94,26 @@ class Resource(BaseModel):
     created_by_agents: list[str]
     created_at: str
 
+    @model_validator(mode="after")
+    def sync_evidence_and_legacy_refs(self):
+        if self.evidence_sources and not self.source_refs:
+            self.source_refs = [source.id for source in self.evidence_sources]
+        elif self.source_refs and not self.evidence_sources:
+            self.evidence_sources = [EvidenceSource(id=ref) for ref in self.source_refs]
+        return self
+
+
+class PlanDecision(BaseModel):
+    resource_type: str
+    priority: float
+    difficulty: str
+    reason: str
+
+
+class PlanSummary(BaseModel):
+    total_estimated_time: int = 0
+    decisions: list[PlanDecision] = Field(default_factory=list)
+
 
 class GenerationJob(BaseModel):
     id: str
@@ -93,6 +121,7 @@ class GenerationJob(BaseModel):
     progress: int = 0
     current_step: str = "queued"
     request: GenerateRequest
+    plan_summary: PlanSummary = Field(default_factory=PlanSummary)
     traces: list[AgentTrace] = Field(default_factory=list)
     resources: list[Resource] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
@@ -122,6 +151,17 @@ class LearningPath(BaseModel):
 class TutorRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     resource_id: str | None = None
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=12)
+
+
+class WeakPointConfirmRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=80)
+    evidence: str = Field(default="", max_length=300)
+
+
+class TutorExerciseSubmitRequest(BaseModel):
+    exercise: dict[str, Any]
+    answer: str = Field(min_length=1, max_length=1000)
 
 
 class TutorResponse(BaseModel):

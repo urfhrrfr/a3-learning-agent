@@ -170,8 +170,24 @@ PROFILE_SEMANTIC_FUSION_SYSTEM_PROMPT = """你是一位专业的高校学习画�
 2. 近义词合并去重：自动合并同义、近义、空格差异、修饰语差异。例如“Python基础”“Python 基础”“Python基础扎实”应统一为“Python”；“代码案例”“Python代码例子”可统一为“代码案例”。
 3. 冲突处理：如果最新对话与旧画像冲突，优先采用最新对话；例如旧画像是“每天30分钟”，最新说“最近每天40分钟”，time_budget 应更新为“每天40分钟”。
 4. 信息保留：没有被最新对话否定的旧画像信息要保留，不要无故删除。
-5. 字段约束：必须返回符合 Profile Pydantic 模型的完整 JSON 对象，字段名、字段类型必须一致。
+5. 字段约束：profile 字段必须是符合 Profile Pydantic 模型的完整 JSON 对象，字段名、字段类型必须一致。
 6. 输出约束：只输出 JSON 对象，不要 Markdown，不要解释文字，不要代码块。
+
+输出 JSON 格式要求：
+{
+  "profile": {完整 Profile JSON},
+  "changed_fields": ["发生变化的字段名"],
+  "conflicts": [
+    {
+      "field": "冲突字段名",
+      "before": "旧值摘要",
+      "after": "新值摘要",
+      "reason": "为什么采用新值"
+    }
+  ],
+  "merge_reasoning": "简要说明本次融合如何处理同义去重、隐含语义和冲突",
+  "confidence": 0.0
+}
 
 Profile JSON 字段要求：
 {
@@ -205,5 +221,5 @@ def build_profile_semantic_fusion_prompt(current_profile: dict, user_message: st
 学生最新自然语言对话：
 {user_message}
 
-请基于旧画像和最新对话，返回融合后的完整 Profile JSON。
+请基于旧画像和最新对话，返回融合后的画像与融合元信息。
 """

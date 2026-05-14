@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from html import escape
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from .core.profile_normalizer import ProfileNormalizer
+from .core.profile_validator import ProfileValidator
 from .knowledge import COURSE, find_chapter
 from .providers.base import BaseLLMProvider, LLMProviderError
 from .providers.factory import get_llm_provider
@@ -61,6 +64,7 @@ class WorkflowState:
         self.resources: list[Resource] = []
         self.traces: list[AgentTrace] = []
         self.plan: list[str] = []
+        self.plan_details: list[dict] = []
         self.feedback_from_review: dict = {}
         self.learning_context: dict = {
             "review_feedback": {},
@@ -146,9 +150,17 @@ class ProfileAgent(Agent):
     stage = "profile"
     boundary = "负责从自然语言对话中抽取学习特征，不直接生成资源"
 
-    def __init__(self, llm: BaseLLMProvider | None = None):
+    def __init__(
+        self,
+        llm: BaseLLMProvider | None = None,
+        normalizer: ProfileNormalizer | None = None,
+        validator: ProfileValidator | None = None,
+    ):
         super().__init__(llm)
         self.confidence_threshold = 0.6
+        self.last_fusion_meta: dict = {}
+        self.normalizer = normalizer or ProfileNormalizer()
+        self.validator = validator or ProfileValidator(self.normalizer)
 
     def _extract_json_from_response(self, text: str) -> dict | None:
         """从 LLM 响应中提取 JSON"""
@@ -158,7 +170,7 @@ class ProfileAgent(Agent):
             return None
 
     def _fallback_extract(self, message: str) -> dict:
-        """当 LLM 不可用时的后备提取方法（基于关键词）"""
+        """当 LLM 不可用时的后备提取方法（基于轻量语义规则）"""
         extracted = {
             "knowledge_base": [],
             "learning_goal": "",
@@ -171,14 +183,16 @@ class ProfileAgent(Agent):
         }
 
         message_lower = message.lower()
+        weak_markers = ["差", "弱", "不好", "不太好", "跟不上", "搞不懂", "不懂", "混淆", "容易错", "不会"]
 
         if "数学" in message_lower or "线代" in message_lower or "线性代数" in message_lower:
-            if "差" in message_lower or "弱" in message_lower or "不好" in message_lower:
+            if any(marker in message_lower for marker in weak_markers):
                 extracted["knowledge_base"].append("线性代数薄弱")
+                extracted["weak_points"].append("线性代数")
             else:
                 extracted["knowledge_base"].append("数学基础")
         if "python" in message_lower:
-            if "差" in message_lower or "弱" in message_lower or "不好" in message_lower:
+            if any(marker in message_lower for marker in ["python差", "python弱", "python不好", "python不太好"]):
                 extracted["knowledge_base"].append("Python薄弱")
             else:
                 extracted["knowledge_base"].append("Python基础")
@@ -212,6 +226,10 @@ class ProfileAgent(Agent):
             extracted["weak_points"].append("模型评估指标")
         if "反向" in message_lower:
             extracted["weak_points"].append("反向传播")
+        if "混淆" in message_lower:
+            extracted["mistake_patterns"].append("概念混淆")
+        if "迁移" in message_lower or "不会用" in message_lower:
+            extracted["mistake_patterns"].append("知识迁移困难")
 
         time_match = re.search(r'每天[^\d]*(\d+)', message_lower)
         if time_match:
@@ -259,20 +277,13 @@ class ProfileAgent(Agent):
         return {
             "extracted": fallback,
             "confidence": 0.5,
-            "reasoning": "关键词匹配（LLM不可用或置信度低）",
+            "reasoning": "轻量语义规则（LLM不可用或置信度低）",
             "source": "fallback"
         }
 
-    def _fuse_list(self, current: list[str], new: list[str]) -> list[str]:
+    def _fuse_list(self, current: list[str], new: list[str], field: str) -> list[str]:
         """融合列表型字段，去重"""
-        merged = []
-        seen = set()
-        for item in new + current:
-            item_norm = re.sub(r"\s+", "", item.strip().lower())
-            if item_norm and item_norm not in seen:
-                seen.add(item_norm)
-                merged.append(item)
-        return merged
+        return self.normalizer.normalize_tags(new + current)
 
     def _fuse_string(self, current: str, new: str, is_conflict: bool = False) -> str:
         """融合字符串型字段，新值优先"""
@@ -306,6 +317,7 @@ class ProfileAgent(Agent):
         return [field for field in fields if before_dict.get(field) != after_dict.get(field)]
 
     def _semantic_fuse_with_llm(self, current_profile: Profile, latest_message: str) -> tuple[Profile, list[str], str] | None:
+        self.last_fusion_meta = {}
         if not latest_message.strip() or self.llm.name == "mock":
             return None
 
@@ -318,21 +330,44 @@ class ProfileAgent(Agent):
         if not isinstance(data, dict):
             return None
 
+        raw_result = data
+        profile_data = data
         if "profile" in data and isinstance(data["profile"], dict):
-            data = data["profile"]
+            profile_data = data["profile"]
         elif "fused" in data and isinstance(data["fused"], dict):
-            data = data["fused"]
+            profile_data = data["fused"]
 
         merged = current_profile.model_dump()
-        merged.update(data)
+        merged.update(profile_data)
         merged["id"] = current_profile.id
         merged["version"] = current_profile.version
         merged["updated_at"] = current_profile.updated_at
 
         fused_profile = Profile(**merged)
-        changed_fields = self._diff_profile_fields(current_profile, fused_profile)
-        reasoning = "LLM语义融合完成：已根据最新对话进行近义词合并、隐含语义理解和冲突处理"
-        return fused_profile, changed_fields, reasoning
+        changed_fields = raw_result.get("changed_fields") or self._diff_profile_fields(current_profile, fused_profile)
+        conflicts = raw_result.get("conflicts") or []
+        reasoning = raw_result.get("merge_reasoning") or "LLM语义融合完成：已根据最新对话进行近义词合并、隐含语义理解和冲突处理"
+        confidence = raw_result.get("confidence", 0.75)
+        validation = self.validator.evaluate_fusion(
+            current_profile.model_dump(),
+            fused_profile.model_dump(),
+            latest_message,
+        )
+        self.last_fusion_meta = {
+            "source": "llm",
+            "changed_fields": changed_fields,
+            "conflicts": conflicts,
+            "merge_reasoning": reasoning,
+            "confidence": confidence,
+            "validation": validation,
+        }
+        conflict_summaries = [
+            f"{item.get('field', 'unknown')}: {item.get('before', '')} -> {item.get('after', '')}；{item.get('reason', '')}"
+            if isinstance(item, dict)
+            else str(item)
+            for item in conflicts
+        ]
+        return fused_profile, conflict_summaries, reasoning
 
     def fuse(
         self,
@@ -341,6 +376,7 @@ class ProfileAgent(Agent):
         latest_message: str = "",
     ) -> tuple[Profile, list[str], str]:
         """融合画像；优先使用 LLM 基于最新自然语言对话做语义融合。"""
+        self.last_fusion_meta = {}
         if latest_message:
             try:
                 semantic_result = self._semantic_fuse_with_llm(current_profile, latest_message)
@@ -356,7 +392,8 @@ class ProfileAgent(Agent):
         for field in ["knowledge_base", "preferred_modalities", "weak_points", "mistake_patterns", "interests"]:
             current_dict[field] = self._fuse_list(
                 current_dict.get(field, []),
-                extracted_features.get(field, [])
+                extracted_features.get(field, []),
+                field,
             )
 
         for field in ["learning_goal", "cognitive_style", "time_budget"]:
@@ -371,6 +408,18 @@ class ProfileAgent(Agent):
         if conflicts:
             reasoning += f"，检测到{len(conflicts)}处冲突并已按最新信息更新"
 
+        self.last_fusion_meta = {
+            "source": "fallback",
+            "changed_fields": self._diff_profile_fields(current_profile, fused_profile),
+            "conflicts": conflicts,
+            "merge_reasoning": reasoning,
+            "confidence": 0.5,
+            "validation": self.validator.evaluate_fusion(
+                current_profile.model_dump(),
+                fused_profile.model_dump(),
+                latest_message,
+            ),
+        }
         return fused_profile, conflicts, reasoning
 
     def run(self, state: WorkflowState) -> dict:
@@ -598,9 +647,212 @@ class PlannerAgent(Agent):
     boundary = "只负责资源组合与任务拆分，不写具体内容"
     depends_on = ["KnowledgeAgent"]
 
+    resource_catalog = {
+        "lecture_doc": {
+            "label": "讲解文档",
+            "difficulty": "入门",
+            "estimated_minutes": 18,
+            "base_priority": 0.78,
+            "modalities": {"文字", "讲解", "例子"},
+        },
+        "mind_map": {
+            "label": "思维导图",
+            "difficulty": "入门",
+            "estimated_minutes": 8,
+            "base_priority": 0.62,
+            "modalities": {"图解", "结构化"},
+        },
+        "quiz": {
+            "label": "分层练习",
+            "difficulty": "基础到提高",
+            "estimated_minutes": 16,
+            "base_priority": 0.82,
+            "modalities": {"练习", "测验", "题目"},
+        },
+        "reading": {
+            "label": "拓展阅读",
+            "difficulty": "提高",
+            "estimated_minutes": 20,
+            "base_priority": 0.5,
+            "modalities": {"阅读", "文字"},
+        },
+        "media_script": {
+            "label": "视频/分镜脚本",
+            "difficulty": "基础",
+            "estimated_minutes": 12,
+            "base_priority": 0.56,
+            "modalities": {"短视频", "动画", "视听"},
+        },
+        "animation_demo": {
+            "label": "教学动画",
+            "difficulty": "基础",
+            "estimated_minutes": 10,
+            "base_priority": 0.58,
+            "modalities": {"动画", "动态图", "图解"},
+        },
+        "ppt_draft": {
+            "label": "PPT 草稿",
+            "difficulty": "综合",
+            "estimated_minutes": 18,
+            "base_priority": 0.45,
+            "modalities": {"PPT", "课件", "展示"},
+        },
+        "visual_card": {
+            "label": "学习卡片",
+            "difficulty": "入门",
+            "estimated_minutes": 10,
+            "base_priority": 0.6,
+            "modalities": {"图解", "卡片", "记忆"},
+        },
+        "code_case": {
+            "label": "代码案例",
+            "difficulty": "应用",
+            "estimated_minutes": 24,
+            "base_priority": 0.66,
+            "modalities": {"代码", "实操", "实验"},
+        },
+    }
+
+    @staticmethod
+    def _parse_time_budget_minutes(raw_budget: str) -> int | None:
+        text = (raw_budget or "").strip()
+        if not text:
+            return None
+        numbers = [int(value) for value in re.findall(r"\d+", text)]
+        if not numbers:
+            return None
+        amount = numbers[0]
+        if "小时" in text or "hour" in text.lower():
+            return amount * 60
+        return amount
+
+    @staticmethod
+    def _contains_any(text: str, keywords: set[str]) -> bool:
+        lowered = text.lower()
+        return any(keyword.lower() in lowered for keyword in keywords)
+
+    def _score_resource(self, resource_type: str, state: WorkflowState) -> tuple[float, list[str]]:
+        meta = self.resource_catalog[resource_type]
+        profile = state.profile
+        context = "；".join(
+            [
+                state.request.goal,
+                "、".join(state.request.pain_points),
+                profile.learning_goal,
+                profile.cognitive_style,
+                "、".join(profile.preferred_modalities),
+                "、".join(profile.weak_points),
+                "、".join(profile.mistake_patterns),
+                "、".join(profile.knowledge_base),
+            ]
+        )
+        score = float(meta["base_priority"])
+        reasons: list[str] = []
+
+        if meta["modalities"] & set(profile.preferred_modalities):
+            score += 0.22
+            reasons.append("匹配学习偏好")
+
+        if "例子" in profile.cognitive_style and resource_type in {"lecture_doc", "media_script", "code_case"}:
+            score += 0.12
+            reasons.append("适合例子驱动型理解")
+
+        if profile.mastery < 0.35 and resource_type in {"lecture_doc", "mind_map", "visual_card", "animation_demo", "quiz"}:
+            score += 0.18
+            reasons.append("当前掌握度偏低，优先补概念框架")
+        elif profile.mastery >= 0.7 and resource_type in {"quiz", "code_case", "reading", "ppt_draft"}:
+            score += 0.16
+            reasons.append("当前掌握度较高，增加迁移与输出任务")
+        elif 0.35 <= profile.mastery < 0.7 and resource_type in {"lecture_doc", "quiz", "code_case", "mind_map"}:
+            score += 0.12
+            reasons.append("适合中等掌握度的讲练结合")
+
+        if state.request.pain_points or profile.weak_points:
+            if resource_type in {"quiz", "lecture_doc", "code_case"}:
+                score += 0.16
+                reasons.append("针对薄弱点安排讲解、练习或实操")
+
+        if self._contains_any(context, {"混淆", "不懂", "概念", "定义"}):
+            if resource_type in {"lecture_doc", "mind_map", "visual_card", "animation_demo"}:
+                score += 0.14
+                reasons.append("帮助澄清概念混淆")
+
+        if self._contains_any(context, {"公式", "迁移", "实验", "项目", "代码", "python", "实操"}):
+            if resource_type in {"code_case", "quiz", "lecture_doc"}:
+                score += 0.14
+                reasons.append("强化公式迁移或动手验证")
+
+        if self._contains_any(context, {"考试", "练习", "测验", "巩固"}):
+            if resource_type in {"quiz", "lecture_doc", "mind_map"}:
+                score += 0.14
+                reasons.append("服务练习巩固或考试复习")
+
+        if self._contains_any(context, {"汇报", "展示", "课件", "ppt"}):
+            if resource_type in {"ppt_draft", "visual_card", "media_script"}:
+                score += 0.18
+                reasons.append("适合汇报展示产出")
+
+        if self._contains_any(context, {"视频", "动画", "短视频", "图解"}):
+            if resource_type in {"media_script", "animation_demo", "visual_card", "mind_map"}:
+                score += 0.14
+                reasons.append("匹配可视化或短视频偏好")
+
+        if not reasons:
+            reasons.append("作为基础资源组合的一部分")
+
+        return round(min(score, 1.0), 2), reasons
+
+    def _target_resource_count(self, state: WorkflowState, allowed_count: int) -> int:
+        if state.request.resource_types:
+            return allowed_count
+        minutes = self._parse_time_budget_minutes(state.profile.time_budget)
+        if minutes is None:
+            return min(7, allowed_count)
+        if minutes <= 20:
+            return min(4, allowed_count)
+        if minutes <= 45:
+            return min(6, allowed_count)
+        if minutes <= 75:
+            return min(7, allowed_count)
+        return allowed_count
+
     def run(self, state: WorkflowState) -> dict:
-        state.plan = ["lecture_doc", "mind_map", "quiz", "reading", "media_script", "animation_demo", "ppt_draft", "visual_card", "code_case"]
-        return {"summary": "规划 9 类资源：讲解、导图、练习、阅读、分镜、教学动画、PPT 草稿、学习卡片、代码案例"}
+        allowed_types = [
+            resource_type
+            for resource_type in self.resource_catalog
+            if not state.request.resource_types or resource_type in state.request.resource_types
+        ]
+        scored = []
+        for resource_type in allowed_types:
+            score, reasons = self._score_resource(resource_type, state)
+            scored.append(
+                {
+                    "type": resource_type,
+                    "label": self.resource_catalog[resource_type]["label"],
+                    "priority": score,
+                    "difficulty": self.resource_catalog[resource_type]["difficulty"],
+                    "estimated_minutes": self.resource_catalog[resource_type]["estimated_minutes"],
+                    "reason": "；".join(reasons[:3]),
+                }
+            )
+
+        scored.sort(key=lambda item: (-item["priority"], item["estimated_minutes"], item["type"]))
+        selected = scored[: self._target_resource_count(state, len(scored))]
+        state.plan = [item["type"] for item in selected]
+        state.plan_details = selected
+        state.learning_context["preferred_resources"] = selected
+
+        total_minutes = sum(item["estimated_minutes"] for item in selected)
+        labels = "、".join(item["label"] for item in selected)
+        return {
+            "summary": f"规划 {len(selected)} 类资源：{labels}；预计学习 {total_minutes} 分钟",
+            "confidence": round(sum(item["priority"] for item in selected) / max(len(selected), 1), 2),
+            "arbitration_note": "按学生偏好、掌握度、薄弱点、目标关键词与时间预算综合排序；显式 resource_types 会作为硬约束。",
+            "review_conclusion": "规划明细：" + " | ".join(
+                f"{item['label']} priority={item['priority']:.2f} reason={item['reason']}"
+                for item in selected
+            ),
+        }
 
 
 class ResourceAgent(Agent):
@@ -608,10 +860,86 @@ class ResourceAgent(Agent):
     content_format = "markdown"
     title_prefix = "资源"
 
+    def plan_item(self, state: WorkflowState) -> dict:
+        return next(
+            (item for item in getattr(state, "plan_details", []) if item.get("type") == self.resource_type),
+            {},
+        )
+
     def content(self, state: WorkflowState) -> str:
         return f"# {self.title_prefix}\n\n基于 {state.chapter['title']} 生成。"
 
+    def evidence_sources(self, state: WorkflowState) -> list[dict]:
+        if not state.sources or not all(isinstance(item, dict) for item in state.sources):
+            return []
+        preferred_sections = {
+            "lecture_doc": {"objectives", "concept_cards", "detailed_concepts", "difficulties", "misconceptions", "real_cases"},
+            "mind_map": {"objectives", "concept_cards", "detailed_concepts", "misconceptions"},
+            "quiz": {"practice_questions", "detailed_concepts", "misconceptions"},
+            "reading": {"reading", "real_cases", "code_labs", "difficulties"},
+            "media_script": {"real_cases", "misconceptions", "detailed_concepts"},
+            "animation_demo": {"detailed_concepts", "misconceptions", "real_cases"},
+            "ppt_draft": {"objectives", "detailed_concepts", "real_cases"},
+            "visual_card": {"concept_cards", "detailed_concepts", "misconceptions", "practice_questions"},
+            "code_case": {"code_labs", "real_cases", "detailed_concepts"},
+        }
+        allowed_sections = preferred_sections.get(self.resource_type, set())
+        typed_sources = [item for item in state.sources if isinstance(item, dict)]
+        matched = [item for item in typed_sources if item.get("section") in allowed_sections]
+        return matched or typed_sources[:3]
+
+    def evidence_context(self, state: WorkflowState, limit: int = 4) -> str:
+        sources = self.evidence_sources(state)[:limit]
+        if not sources:
+            return ""
+        lines = []
+        for source in sources:
+            text = re.sub(r"\s+", " ", str(source.get("text", ""))).strip()
+            if len(text) > 180:
+                text = text[:177] + "..."
+            lines.append(
+                f"- [{source.get('id')}] score={float(source.get('relevance_score', 0)):.2f} "
+                f"{source.get('chapter_title', '')}/{source.get('section', '')}：{text}"
+            )
+        return "\n".join(lines)
+
+    def evidence_xml_context(self, state: WorkflowState) -> str:
+        sources = self.evidence_sources(state)
+        if not sources:
+            return "<EVIDENCE_CONTEXT />"
+        fragments = ["<EVIDENCE_CONTEXT>"]
+        for source in sources:
+            fragments.append(
+                "  <SOURCE "
+                f"id=\"{escape(str(source.get('id', '')))}\" "
+                f"relevance_score=\"{float(source.get('relevance_score', 0)):.2f}\">"
+            )
+            fragments.append(f"    <TEXT>{escape(str(source.get('text', '')))}</TEXT>")
+            fragments.append(f"    <REASON>{escape(str(source.get('reason', '')))}</REASON>")
+            fragments.append("  </SOURCE>")
+        fragments.append("</EVIDENCE_CONTEXT>")
+        return "\n".join(fragments)
+
+    def allowed_evidence_ids(self, state: WorkflowState) -> set[str]:
+        return {str(source.get("id")) for source in self.evidence_sources(state) if source.get("id")}
+
+    def append_evidence_section(self, content: str, state: WorkflowState) -> str:
+        if self.content_format != "markdown" or "## 检索依据" in content:
+            return content
+        evidence = self.evidence_context(state)
+        if not evidence:
+            return content
+        return f"{content.rstrip()}\n\n## 检索依据\n{evidence}"
+
     def source_refs(self, state: WorkflowState) -> list[str]:
+        evidence_ids = [
+            str(item.get("id"))
+            for item in self.evidence_sources(state)
+            if item.get("id")
+        ]
+        if evidence_ids:
+            return evidence_ids
+
         refs_by_type = {
             "lecture_doc": ["#objectives", "#detailed_concepts", "#misconceptions", "#real_cases"],
             "mind_map": ["#detailed_concepts", "#misconceptions"],
@@ -628,15 +956,24 @@ class ResourceAgent(Agent):
 
     def run(self, state: WorkflowState) -> dict:
         content, used_llm, fallback_reason = self.generate_content(state)
+        content = self.append_evidence_section(content, state)
+        plan_item = self.plan_item(state)
+        target_profile = [
+            state.profile.cognitive_style,
+            *state.profile.preferred_modalities[:2],
+        ]
+        if plan_item.get("reason"):
+            target_profile.append(str(plan_item["reason"]))
         resource = Resource(
             id=f"res_{uuid4().hex[:8]}",
             type=self.resource_type,
             title=f"{self.title_prefix}：{state.chapter['title']}",
             content_format=self.content_format,
             content=content,
+            evidence_sources=self.evidence_sources(state),
             source_refs=self.source_refs(state),
-            difficulty="入门到提高",
-            target_profile=[state.profile.cognitive_style, *state.profile.preferred_modalities[:2]],
+            difficulty=str(plan_item.get("difficulty") or "入门到提高"),
+            target_profile=target_profile,
             review_status="needs_revision",
             created_by_agents=["KnowledgeAgent", self.name],
             created_at=now(),
@@ -661,6 +998,13 @@ class LectureAgent(ResourceAgent):
     boundary = "只生成讲解文档，不修改题库或路径"
     depends_on = ["PlannerAgent", "KnowledgeAgent"]
 
+    def _inline_cite(self, state: WorkflowState, index: int = 0) -> str:
+        sources = self.evidence_sources(state)
+        if not sources:
+            return ""
+        source_id = sources[min(index, len(sources) - 1)].get("id", "")
+        return f" [来源: {source_id}]" if source_id else ""
+
     def content(self, state: WorkflowState) -> str:
         concepts = state.chapter["concepts"]
         detailed_concepts = state.chapter["detailed_concepts"]
@@ -673,16 +1017,16 @@ class LectureAgent(ResourceAgent):
             "## 1. 本节课要解决的问题\n"
             f"你当前目标是：**{state.request.goal}**。本材料会先建立概念框架，再用一个校园学习场景把抽象术语落到输入、处理过程和输出。\n\n"
             "## 2. 学习目标\n"
-            f"- 能用自己的话解释：{concepts[0]}、{concepts[1]}、{concepts[2]}、{concepts[3]}\n"
-            f"- 能判断一个案例中是否出现：{misconceptions[1]}\n"
+            f"- 能用自己的话解释：{concepts[0]}、{concepts[1]}、{concepts[2]}、{concepts[3]}{self._inline_cite(state, 0)}\n"
+            f"- 能判断一个案例中是否出现：{misconceptions[1]}{self._inline_cite(state, 1)}\n"
             f"- 能把薄弱点“{'、'.join(pain_points)}”转成可练习的小任务\n\n"
             "## 3. 核心概念速查\n"
             f"| 概念 | 一句话解释 | 学习时要抓住 |\n"
             f"| --- | --- | --- |\n"
-            f"| {concepts[0]} | 模型看到并学习规律的样本或状态。 | 它是输入，不是最终结论。 |\n"
-            f"| {concepts[1]} | 模型在新情况上继续有效的能力。 | 重点看新数据表现。 |\n"
-            f"| {concepts[2]} | 衡量预测和真实目标差距的函数。 | 它决定优化方向。 |\n"
-            f"| {concepts[3]} | 在已见数据上表现很好，但新数据变差。 | 需要测试集、正则化或更合理特征。 |\n\n"
+            f"| {concepts[0]} | 模型看到并学习规律的样本或状态。{self._inline_cite(state, 0)} | 它是输入，不是最终结论。 |\n"
+            f"| {concepts[1]} | 模型在新情况上继续有效的能力。{self._inline_cite(state, 1)} | 重点看新数据表现。 |\n"
+            f"| {concepts[2]} | 衡量预测和真实目标差距的函数。{self._inline_cite(state, 2)} | 它决定优化方向。 |\n"
+            f"| {concepts[3]} | 在已见数据上表现很好，但新数据变差。{self._inline_cite(state, 3)} | 需要测试集、正则化或更合理特征。 |\n\n"
             "## 4. 类比案例：校园课程推荐\n"
             "学校想给学生推荐课程。历史选课记录相当于训练数据，推荐算法相当于模型，学生是否真的喜欢推荐课程就是评价结果。"
             "如果系统只记住了上学期少数同学的选择，就可能在训练记录上表现很好，但遇到新同学时推荐失准，这就是过拟合的直观版本。\n\n"
@@ -701,19 +1045,64 @@ class LectureAgent(ResourceAgent):
             "写一段 120 字小结：用一个生活例子解释“训练表现好”和“泛化表现好”的区别，并指出如何验证。"
         )
 
+    def _build_grounded_prompt(self, state: WorkflowState) -> str:
+        evidence_json = json.dumps(self.evidence_sources(state), ensure_ascii=False)
+        return f"""SYSTEM:
+你是高校课程讲解智能体。你必须遵守 Strict Grounding（严格锚定）规则：
+1. 只能且必须基于 <EVIDENCE_CONTEXT> 中的 SOURCE 内容生成正文。
+2. 严禁编造 <EVIDENCE_CONTEXT> 外的定义、事实、案例、实验步骤或结论。
+3. 如果证据不足，请在正文中明确写“当前证据不足”，不要补充外部知识。
+4. 正文中的核心概念、误区、案例和任务必须使用内联引用，格式为 [来源: source_id]。
+5. 最终只返回 JSON 对象，不要 Markdown 代码块，不要额外解释。
+
+USER:
+课程章节：{state.chapter['title']}
+学生当前目标：{state.request.goal}
+学生画像摘要：
+- 学习目标：{state.profile.learning_goal}
+- 薄弱点：{'、'.join(state.profile.weak_points)}
+- 常见错误模式：{'、'.join(state.profile.mistake_patterns)}
+- 学习偏好：{state.profile.cognitive_style}；{'、'.join(state.profile.preferred_modalities)}
+
+{self.evidence_xml_context(state)}
+
+请生成中文 Markdown 讲解文档，并返回严格 JSON：
+{{
+  "content": "Markdown 正文。核心概念必须带 [来源: id] 内联引用。",
+  "evidence_sources": {evidence_json}
+}}
+"""
+
+    def _normalize_grounded_response(self, raw_content: str, state: WorkflowState) -> str | None:
+        parsed = parse_llm_json(raw_content)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("content"), str):
+            return None
+        allowed_ids = {str(source.get("id")) for source in self.evidence_sources(state)}
+        returned_sources = parsed.get("evidence_sources", [])
+        returned_ids = {
+            str(source.get("id"))
+            for source in returned_sources
+            if isinstance(source, dict) and source.get("id")
+        }
+        if allowed_ids and not returned_ids.issubset(allowed_ids):
+            return None
+        content = parsed["content"].strip()
+        if allowed_ids and "[来源:" not in content:
+            return None
+        return content
+
     def generate_content(self, state: WorkflowState) -> tuple[str, bool, str]:
         fallback = self.content(state)
-        prompt = (
-            "请基于以下课程知识生成一份中文 Markdown 个性化讲解文档。\n"
-            f"课程章节：{state.chapter['title']}\n"
-            f"学习目标：{state.request.goal}\n"
-            f"学生画像：{state.profile.model_dump()}\n"
-            f"核心概念：{state.chapter['concepts']}\n"
-            f"详细知识点：{state.chapter['detailed_concepts']}\n"
-            f"常见误区：{state.chapter['misconceptions']}\n"
-            "要求包含学习目标、核心概念表、案例、易错提醒、课后任务。"
-        )
-        return self.use_llm_or_fallback(prompt, fallback)
+        content, used_llm, reason = self.use_llm_or_fallback(self._build_grounded_prompt(state), fallback)
+        if not used_llm:
+            return content, used_llm, reason
+        try:
+            grounded_content = self._normalize_grounded_response(content, state)
+        except json.JSONDecodeError as exc:
+            return fallback, False, f"LLM returned invalid grounded lecture JSON: {exc}"
+        if grounded_content:
+            return grounded_content, True, ""
+        return fallback, False, "LLM returned lecture content that violated strict grounding contract"
 
 
 class MindMapAgent(ResourceAgent):
@@ -815,18 +1204,27 @@ class QuizAgent(ResourceAgent):
     boundary = "只生成题目及答案解析，不决定审核状态"
     depends_on = ["PlannerAgent", "KnowledgeAgent"]
 
+    def _source_id(self, state: WorkflowState, index: int = 0) -> str:
+        sources = self.evidence_sources(state)
+        if not sources:
+            return ""
+        return str(sources[min(index, len(sources) - 1)].get("id", ""))
+
     def content(self, state: WorkflowState) -> str:
         questions = []
         for item in state.chapter["practice_questions"]:
+            source_id = self._source_id(state, len(questions))
+            citation = f" [来源: {source_id}]" if source_id else ""
             question = {
                 "level": "基础" if item["type"] in {"choice", "true_false"} else "应用",
                 "difficulty": item.get("difficulty", "基础" if item["type"] in {"choice", "true_false"} else "应用"),
                 "type": item["type"],
-                "question": item["stem"],
+                "question": f"{item['stem']}{citation}",
                 "answer": item["standard_answer"],
-                "explanation": item["explanation"],
+                "explanation": f"{item['explanation']}{citation}",
                 "assessment_point": item.get("assessment_point", ""),
                 "rubric": item.get("rubric", []),
+                "source_id": source_id,
             }
             if item["type"] == "choice":
                 question["options"] = item.get(
@@ -843,22 +1241,73 @@ class QuizAgent(ResourceAgent):
             questions.append(question)
         return json.dumps(questions, ensure_ascii=False, indent=2)
 
+    def _build_grounded_prompt(self, state: WorkflowState) -> str:
+        evidence_json = json.dumps(self.evidence_sources(state), ensure_ascii=False)
+        return f"""SYSTEM:
+你是高校课程练习题生成智能体。你必须遵守 Strict Grounding（严格锚定）规则：
+1. 只能且必须基于 <EVIDENCE_CONTEXT> 中的 SOURCE 内容生成题目、答案和解析。
+2. 严禁编造 <EVIDENCE_CONTEXT> 外的事实、概念边界、案例或实验结论。
+3. 每道题必须绑定一个来自 <EVIDENCE_CONTEXT> 的 source_id。
+4. question 或 explanation 至少一处必须包含内联引用 [来源: source_id]。
+5. 最终只返回 JSON 对象，不要 Markdown 代码块，不要额外解释。
+
+USER:
+课程章节：{state.chapter['title']}
+学生当前目标：{state.request.goal}
+学生薄弱点：{'、'.join(state.profile.weak_points)}
+题型要求：至少包含选择、判断、简答或场景题中的 3 类。
+
+{self.evidence_xml_context(state)}
+
+请返回严格 JSON：
+{{
+  "content": [
+    {{
+      "level": "基础/应用/提高",
+      "difficulty": "基础/应用/提高/综合",
+      "type": "choice/true_false/short_answer/scenario/code_reading",
+      "question": "题干，必须带 [来源: id]",
+      "answer": "标准答案",
+      "explanation": "解析，必须基于证据并带 [来源: id]",
+      "assessment_point": "考查点",
+      "rubric": ["评分点"],
+      "source_id": "证据 id",
+      "options": ["选择题或判断题选项，可选"]
+    }}
+  ],
+  "evidence_sources": {evidence_json}
+}}
+"""
+
+    def _normalize_grounded_quiz(self, raw_content: str, state: WorkflowState) -> str | None:
+        parsed = parse_llm_json(raw_content)
+        items = parsed.get("content") if isinstance(parsed, dict) else parsed
+        if not isinstance(items, list) or not items:
+            return None
+        allowed_ids = self.allowed_evidence_ids(state)
+        normalized = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            source_id = str(item.get("source_id", ""))
+            if allowed_ids and source_id not in allowed_ids:
+                return None
+            question = str(item.get("question", ""))
+            explanation = str(item.get("explanation", ""))
+            if allowed_ids and "[来源:" not in f"{question}\n{explanation}":
+                return None
+            normalized.append(item)
+        return json.dumps(normalized, ensure_ascii=False, indent=2)
+
     def generate_content(self, state: WorkflowState) -> tuple[str, bool, str]:
         fallback = self.content(state)
-        prompt = (
-            "请生成分层练习题 JSON 数组，不要输出 Markdown。\n"
-            f"章节：{state.chapter['title']}\n"
-            f"核心概念：{state.chapter['concepts']}\n"
-            f"题库草案：{state.chapter['practice_questions']}\n"
-            "每题包含 level、difficulty、type、question、answer、explanation、assessment_point、rubric；选择题包含 options。"
-        )
-        content, used_llm, reason = self.use_llm_or_fallback(prompt, fallback)
+        content, used_llm, reason = self.use_llm_or_fallback(self._build_grounded_prompt(state), fallback)
         if used_llm:
             try:
-                parsed = parse_llm_json(content)
-                if isinstance(parsed, list) and parsed:
-                    return json.dumps(parsed, ensure_ascii=False, indent=2), True, ""
-                return fallback, False, "LLM returned quiz JSON that is not a non-empty array"
+                grounded_quiz = self._normalize_grounded_quiz(content, state)
+                if grounded_quiz:
+                    return grounded_quiz, True, ""
+                return fallback, False, "LLM returned quiz content that violated strict grounding contract"
             except json.JSONDecodeError as exc:
                 return fallback, False, f"LLM returned invalid quiz JSON: {exc}"
         return content, used_llm, reason
@@ -1178,15 +1627,23 @@ class CodeCaseAgent(ResourceAgent):
     boundary = "只生成示例实验脚本，不执行真实沙箱评测"
     depends_on = ["PlannerAgent", "KnowledgeAgent"]
 
+    def _source_id(self, state: WorkflowState, index: int = 0) -> str:
+        sources = self.evidence_sources(state)
+        if not sources:
+            return ""
+        return str(sources[min(index, len(sources) - 1)].get("id", ""))
+
     def content(self, state: WorkflowState) -> str:
         code_labs = state.chapter["code_labs"]
+        source_id = self._source_id(state, 0)
+        citation = f" [来源: {source_id}]" if source_id else ""
         return f'''"""
 {state.chapter['title']}：多实验对比脚本（仅标准库）
 
 学习目标：
-1. 理解核心概念如何影响预测。
-2. 对比理想样本、噪声样本与边界样本下的行为差异。
-3. 把抽象术语转成可运行的验证证据。
+1. 理解核心概念如何影响预测。{citation}
+2. 对比理想样本、噪声样本与边界样本下的行为差异。{citation}
+3. 把抽象术语转成可运行的验证证据。{citation}
 """
 
 samples = [
@@ -1230,25 +1687,55 @@ print("2. 如果训练样本很少，模型为什么可能泛化不好？")
 print("3. 你会增加哪些样本来让判断更可靠？")
 print("\\n拓展实验：")
 for item in {code_labs!r}:
-    print("-", item)
+    print("-", item, "{citation}")
 '''
+
+    def _build_grounded_prompt(self, state: WorkflowState) -> str:
+        evidence_json = json.dumps(self.evidence_sources(state), ensure_ascii=False)
+        return f"""SYSTEM:
+你是高校课程代码实验生成智能体。你必须遵守 Strict Grounding（严格锚定）规则：
+1. 只能且必须基于 <EVIDENCE_CONTEXT> 中的 SOURCE 内容生成代码案例。
+2. 严禁编造 <EVIDENCE_CONTEXT> 外的算法事实、实验结论、数据假设或教学目标。
+3. 代码注释或 docstring 中必须标注 [来源: source_id]。
+4. 只输出 JSON 对象，不要 Markdown 代码块，不要额外解释。
+5. 代码必须可直接保存为 Python 文件运行，优先仅使用标准库。
+
+USER:
+课程章节：{state.chapter['title']}
+学生当前目标：{state.request.goal}
+学生知识基础：{'、'.join(state.profile.knowledge_base)}
+学生薄弱点：{'、'.join(state.profile.weak_points)}
+
+{self.evidence_xml_context(state)}
+
+请返回严格 JSON：
+{{
+  "content": "完整 Python 代码字符串。docstring 或关键注释必须带 [来源: id]。",
+  "evidence_sources": {evidence_json}
+}}
+"""
+
+    def _normalize_grounded_code(self, raw_content: str, state: WorkflowState) -> str | None:
+        parsed = parse_llm_json(raw_content)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("content"), str):
+            return None
+        content = parsed["content"].strip()
+        if self.allowed_evidence_ids(state) and "[来源:" not in content:
+            return None
+        return content
 
     def generate_content(self, state: WorkflowState) -> tuple[str, bool, str]:
         fallback = self.content(state)
-        prompt = (
-            "你是一个资深的计算机教授，请基于给定的课程章节、核心概念和学生的编程语言偏好，"
-            "生成一段带详细注释的代码实操案例。\n\n"
-            "请满足以下要求：\n"
-            "1. 代码应围绕课程章节的核心概念设计，适合教学演示和学生动手练习。\n"
-            "2. 代码中要包含详细注释，解释关键变量、函数、流程和输出含义。\n"
-            "3. 优先贴合学生已有知识基础与编程语言偏好；如果没有明确语言偏好，默认使用 Python。\n"
-            "4. 只输出可直接作为学习资源使用的代码内容，可以在代码注释中包含必要的思考题。\n\n"
-            f"课程章节标题：{state.chapter['title']}\n"
-            f"核心概念：{state.chapter['concepts']}\n"
-            f"代码实操任务：{state.chapter['code_labs']}\n"
-            f"学生知识基础与偏好：{state.profile.knowledge_base}\n"
-        )
-        return self.use_llm_or_fallback(prompt, fallback)
+        content, used_llm, reason = self.use_llm_or_fallback(self._build_grounded_prompt(state), fallback)
+        if not used_llm:
+            return content, used_llm, reason
+        try:
+            grounded_code = self._normalize_grounded_code(content, state)
+        except json.JSONDecodeError as exc:
+            return fallback, False, f"LLM returned invalid code case JSON: {exc}"
+        if grounded_code:
+            return grounded_code, True, ""
+        return fallback, False, "LLM returned code content that violated strict grounding contract"
 
 
 class ReviewAgent(Agent):
@@ -1384,6 +1871,7 @@ class ReviewAgent(Agent):
             "practice",
             "objectives",
             "concepts",
+            "concept_cards",
             "detailed_concepts",
             "difficulties",
             "misconceptions",
@@ -1399,7 +1887,97 @@ class ReviewAgent(Agent):
 
     def _invalid_source_refs(self, resource: Resource, chapter: dict) -> list[str]:
         allowed_refs = self._allowed_source_refs(chapter)
-        return [ref for ref in resource.source_refs if ref not in allowed_refs]
+        invalid_refs = []
+        for ref in resource.source_refs:
+            base_ref = str(ref).split(":", 1)[0]
+            if ref not in allowed_refs and base_ref not in allowed_refs:
+                invalid_refs.append(ref)
+        return invalid_refs
+
+    @staticmethod
+    def _inline_source_ids(content: str) -> list[str]:
+        return [match.strip() for match in re.findall(r"\[来源:\s*([^\]]+?)\s*\]", content)]
+
+    def _invalid_evidence_ids(self, resource: Resource, chapter: dict) -> list[str]:
+        allowed_refs = self._allowed_source_refs(chapter)
+        invalid_ids = []
+        for evidence in resource.evidence_sources:
+            evidence_id = str(evidence.id)
+            base_ref = evidence_id.split(":", 1)[0]
+            if evidence_id not in allowed_refs and base_ref not in allowed_refs:
+                invalid_ids.append(evidence_id)
+        return invalid_ids
+
+    @staticmethod
+    def _evidence_keywords(text: str) -> set[str]:
+        tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", text.lower())
+        stop_words = {"学习", "目标", "当前", "章节", "知识", "理解", "掌握", "案例", "相关", "一个", "需要", "可以"}
+        keywords = {token for token in tokens if token not in stop_words}
+        for token in tokens:
+            if re.fullmatch(r"[\u4e00-\u9fff]{3,}", token):
+                for size in range(2, min(4, len(token)) + 1):
+                    for index in range(0, len(token) - size + 1):
+                        ngram = token[index : index + size]
+                        if ngram not in stop_words:
+                            keywords.add(ngram)
+        return keywords
+
+    def _content_hits_evidence(self, resource: Resource) -> tuple[bool, list[str]]:
+        content_tokens = self._evidence_keywords(resource.content)
+        hit_ids: list[str] = []
+        for evidence in resource.evidence_sources:
+            evidence_tokens = self._evidence_keywords(evidence.text)
+            if not evidence_tokens:
+                continue
+            overlap = content_tokens & evidence_tokens
+            if len(overlap) >= 1:
+                hit_ids.append(evidence.id)
+        return bool(hit_ids), hit_ids[:5]
+
+    def _evidence_review(self, resource: Resource, chapter: dict) -> dict:
+        issues: list[str] = []
+        notes: list[str] = []
+        evidence_by_id = {evidence.id: evidence for evidence in resource.evidence_sources}
+        inline_ids = self._inline_source_ids(resource.content)
+
+        if not resource.evidence_sources:
+            issues.append("缺少 evidence_sources 结构化证据")
+            notes.append("未找到结构化证据，无法证明内容来自 KnowledgeAgent 召回片段。")
+            return {"passed": False, "issues": issues, "notes": notes, "inline_ids": inline_ids, "hit_ids": []}
+
+        missing_text_ids = [evidence.id for evidence in resource.evidence_sources if not evidence.text.strip()]
+        if missing_text_ids:
+            issues.append("evidence_sources 缺少原文 text")
+            notes.append(f"缺少证据原文的来源：{'、'.join(missing_text_ids[:5])}")
+
+        invalid_evidence_ids = self._invalid_evidence_ids(resource, chapter)
+        if invalid_evidence_ids:
+            issues.append("evidence_sources 存在无效来源 ID")
+            notes.append(f"无效证据来源：{'、'.join(invalid_evidence_ids[:5])}")
+
+        unknown_inline_ids = [source_id for source_id in inline_ids if source_id not in evidence_by_id]
+        if unknown_inline_ids:
+            issues.append("正文内联来源引用无法映射到 evidence_sources")
+            notes.append(f"无法映射的正文引用：{'、'.join(unknown_inline_ids[:5])}")
+
+        if resource.content_format == "markdown" and not inline_ids:
+            issues.append("Markdown 正文缺少 [来源: id] 内联引用")
+            notes.append("正文没有出现可追踪的 [来源: id] 引用。")
+
+        hits_evidence, hit_ids = self._content_hits_evidence(resource)
+        if not hits_evidence:
+            issues.append("核心内容未命中任何证据片段")
+            notes.append("正文关键词与 evidence_sources 原文没有形成可检测重叠。")
+        else:
+            notes.append(f"内容命中的证据片段：{'、'.join(hit_ids)}")
+
+        return {
+            "passed": not issues,
+            "issues": issues,
+            "notes": notes,
+            "inline_ids": inline_ids,
+            "hit_ids": hit_ids,
+        }
 
     def run(self, state: WorkflowState) -> dict:
         blocked = 0
@@ -1409,7 +1987,9 @@ class ReviewAgent(Agent):
         fact_check_summary: list[str] = []
         for resource in state.resources:
             has_sources = bool(resource.source_refs)
+            has_evidence = bool(resource.evidence_sources)
             invalid_refs = self._invalid_source_refs(resource, state.chapter) if has_sources else []
+            evidence_review = self._evidence_review(resource, state.chapter)
             is_related, matched_keywords = self._is_relevant(resource, keywords)
             fact_check = self._basic_fact_check(resource.content, state.chapter)
             llm_fact_check = self._attempt_llm_fact_check(resource.content, state.chapter)
@@ -1427,17 +2007,7 @@ class ReviewAgent(Agent):
                     )
                     fact_check["accuracy_score"] = min(fact_check["accuracy_score"], float(llm_fact_check.get("confidence", 0.5)))
 
-            if not has_sources:
-                reasons.append("缺少 source_refs 来源标注")
-                notes.append("未找到任何课程来源引用，无法证明内容来自知识库。")
-                resource.review_status = "needs_revision"
-                needs_revision += 1
-            elif invalid_refs:
-                reasons.append("source_refs 存在无效引用")
-                notes.append(f"无效来源引用：{'、'.join(invalid_refs[:3])}")
-                resource.review_status = "needs_revision"
-                needs_revision += 1
-            elif "违法" in resource.content:
+            if "违法" in resource.content:
                 reasons.append("内容命中安全风险关键词")
                 notes.append("内容包含安全风险关键词，已阻断。")
                 resource.review_status = "blocked"
@@ -1447,6 +2017,21 @@ class ReviewAgent(Agent):
                 notes.extend(issue["description"] for issue in fact_check["issues"])
                 resource.review_status = "blocked"
                 blocked += 1
+            elif not has_evidence or not evidence_review["passed"]:
+                reasons.extend(evidence_review["issues"] or ["结构化证据审核未通过"])
+                notes.extend(evidence_review["notes"])
+                resource.review_status = "needs_revision"
+                needs_revision += 1
+            elif not has_sources:
+                reasons.append("缺少 source_refs 兼容来源标注")
+                notes.append("未找到兼容 source_refs；请确认 evidence_sources 到 source_refs 的派生逻辑。")
+                resource.review_status = "needs_revision"
+                needs_revision += 1
+            elif invalid_refs:
+                reasons.append("source_refs 存在无效引用")
+                notes.append(f"无效来源引用：{'、'.join(invalid_refs[:3])}")
+                resource.review_status = "needs_revision"
+                needs_revision += 1
             elif not is_related:
                 reasons.append("内容与当前课程知识点匹配度不足")
                 notes.append("标题和正文中匹配到的课程关键词不足，建议补充章节核心概念或案例。")
@@ -1458,20 +2043,26 @@ class ReviewAgent(Agent):
                 resource.review_status = "needs_revision"
                 needs_revision += 1
             else:
-                reasons.append("来源完整且与课程知识点相关")
-                notes.append("来源引用均可映射到当前课程知识库。")
+                reasons.append("结构化证据完整且与课程知识点相关")
+                notes.append("evidence_sources 原文、正文引用与课程知识库映射均通过。")
                 notes.append("内容命中章节核心概念或案例，相关性检查通过。")
                 resource.review_status = "passed"
                 passed += 1
 
+            if has_evidence:
+                notes.append(f"结构化证据数量：{len(resource.evidence_sources)}")
             if has_sources:
                 notes.append(f"来源数量：{len(resource.source_refs)}")
+            if evidence_review.get("inline_ids"):
+                notes.append(f"正文引用：{'、'.join(evidence_review['inline_ids'][:5])}")
             if matched_keywords:
                 notes.append(f"相关关键词：{'、'.join(matched_keywords)}")
             notes.append(f"基础事实校验分：{fact_check['accuracy_score']:.2f}")
 
             confidence = 0.45
-            if has_sources and not invalid_refs:
+            if has_evidence and evidence_review["passed"]:
+                confidence += 0.25
+            elif has_sources and not invalid_refs:
                 confidence += 0.25
             if is_related:
                 confidence += 0.25
@@ -1884,6 +2475,9 @@ class Orchestrator:
 
         for agent_name in execution_order:
             if agent_name not in enabled_agents:
+                continue
+            resource_type = self.producer_resource_types.get(agent_name)
+            if resource_type and state.plan and resource_type not in state.plan:
                 continue
             agent = agent_map.get(agent_name)
             if not agent:

@@ -8,7 +8,9 @@ from uuid import uuid4
 os.environ.setdefault("LLM_PROVIDER", "mock")
 
 from app import state, storage
-from app.agents import KnowledgeAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.agents import KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.core.profile_normalizer import ProfileNormalizer
+from app.core.profile_validator import ProfileValidator
 from app.knowledge import COURSE, question_bank
 from app.main import app
 from app.path_planner import PathPlanner
@@ -30,22 +32,35 @@ class SemanticFusionLLM(MockLLMProvider):
         assert "学生最新自然语言对话" in prompt
         return json.dumps(
             {
-                "id": "student_demo",
-                "major": "计算机科学与技术",
-                "education_level": "本科二年级",
-                "course": "人工智能导论",
-                "current_chapter": "机器学习基础",
-                "knowledge_base": ["Python"],
-                "learning_goal": "完成课程项目",
-                "cognitive_style": "例子驱动",
-                "preferred_modalities": ["代码案例"],
-                "time_budget": "每天40分钟",
-                "weak_points": ["线性代数"],
-                "mistake_patterns": [],
-                "interests": ["机器学习应用"],
-                "mastery": 0.42,
-                "version": 99,
-                "updated_at": "should-be-preserved",
+                "profile": {
+                    "id": "student_demo",
+                    "major": "计算机科学与技术",
+                    "education_level": "本科二年级",
+                    "course": "人工智能导论",
+                    "current_chapter": "机器学习基础",
+                    "knowledge_base": ["Python"],
+                    "learning_goal": "完成课程项目",
+                    "cognitive_style": "例子驱动",
+                    "preferred_modalities": ["代码案例"],
+                    "time_budget": "每天40分钟",
+                    "weak_points": ["线性代数"],
+                    "mistake_patterns": [],
+                    "interests": ["机器学习应用"],
+                    "mastery": 0.42,
+                    "version": 99,
+                    "updated_at": "should-be-preserved",
+                },
+                "changed_fields": ["knowledge_base", "learning_goal", "time_budget", "weak_points"],
+                "conflicts": [
+                    {
+                        "field": "time_budget",
+                        "before": "每天30分钟",
+                        "after": "每天40分钟",
+                        "reason": "最新对话优先",
+                    }
+                ],
+                "merge_reasoning": "合并 Python 近义标签，并将线性代数不太好识别为薄弱点。",
+                "confidence": 0.91,
             },
             ensure_ascii=False,
         )
@@ -117,6 +132,7 @@ JOB_FIELDS = {
     "progress",
     "current_step",
     "request",
+    "plan_summary",
     "traces",
     "resources",
     "events",
@@ -178,6 +194,199 @@ def test_profile_chat_updates_profile():
     data = payload(client.post("/api/profile/chat", json={"message": "我线性代数薄弱，希望多给 Python 代码案例"}))
     assert data["profile"]["version"] >= 2
     assert "代码案例" in data["profile"]["preferred_modalities"]
+    assert data["fusion_meta"]["source"] in {"fallback", "llm"}
+
+
+def test_tutor_suggests_and_confirms_weak_point_from_profile_signal():
+    headers = {"X-User-Id": f"tutor-tier2-{uuid4().hex[:8]}"}
+    payload(client.post("/api/profile/chat", json={"message": "我喜欢图解方式"}, headers=headers))
+
+    tutor = payload(client.post("/api/tutor/chat", json={"question": "我还是不懂梯度下降"}, headers=headers))
+
+    assert tutor["profile_suggestion"]["topic"] == "梯度下降"
+    assert tutor["profile_suggestion"]["already_exists"] is False
+    assert tutor["personalization"]["preferred_mode"] == "图解"
+    assert "梯度下降" not in tutor["profile_snapshot"]["weak_points"]
+
+    confirmed = payload(
+        client.post(
+            "/api/profile/weak-points/confirm",
+            json={"topic": "梯度下降", "evidence": tutor["profile_suggestion"]["message"]},
+            headers=headers,
+        )
+    )
+
+    assert confirmed["profile_updated"] is True
+    assert "梯度下降" in confirmed["profile"]["weak_points"]
+
+    repeated = payload(client.post("/api/tutor/chat", json={"question": "我还是不懂梯度下降"}, headers=headers))
+    assert repeated["profile_suggestion"]["already_exists"] is True
+
+
+def test_tutor_learning_loop_generates_exercise_and_updates_mastery():
+    headers = {"X-User-Id": f"tutor-loop-{uuid4().hex[:8]}"}
+    payload(client.post("/api/profile/chat", json={"message": "我喜欢代码案例，梯度下降有点弱"}, headers=headers))
+
+    tutor = payload(client.post("/api/tutor/chat", json={"question": "我还是不懂梯度下降"}, headers=headers))
+
+    assert tutor["exercise"]["topic"] == "梯度下降"
+    assert tutor["next_step"]["title"]
+    assert "cited_resources" in tutor
+
+    before = payload(client.get("/api/profile/current", headers=headers))
+    result = payload(
+        client.post(
+            "/api/tutor/exercise/submit",
+            json={
+                "exercise": tutor["exercise"],
+                "answer": "负梯度方向会让损失下降，学习率控制每一步更新的大小。",
+            },
+            headers=headers,
+        )
+    )
+
+    assert result["score"] >= 80
+    assert result["profile"]["mastery"] > before["mastery"]
+    assert result["learning_path"]["steps"]
+    assert result["next_step"]["title"]
+
+
+def test_profile_normalizer_static_aliases_and_injection():
+    normalizer = ProfileNormalizer({"高数": "高等数学", "python基础": "Python", "代码": "代码案例"})
+
+    assert normalizer.normalize_tags([" 高数 ", "高等数学", "PYTHON 基础", "代码"]) == ["高等数学", "Python", "代码案例"]
+
+    agent = ProfileAgent(MockLLMProvider(), normalizer=normalizer)
+    current = state.Profile(knowledge_base=["高数"], preferred_modalities=[], updated_at=state.now())
+    fused, _, _ = agent.fuse(
+        current,
+        {"extracted": {"knowledge_base": ["高等数学", "Python 基础"], "preferred_modalities": ["代码"]}},
+    )
+
+    assert fused.knowledge_base == ["高等数学", "Python"]
+    assert fused.preferred_modalities == ["代码案例"]
+
+
+def test_profile_validator_accepts_supported_fusion():
+    old_profile = state.Profile(
+        learning_goal="通过期末考试",
+        weak_points=["线性代数", "梯度下降"],
+        preferred_modalities=["图解", "代码案例"],
+        updated_at=state.now(),
+    ).model_dump()
+    new_profile = state.Profile(
+        learning_goal="完成课程项目",
+        weak_points=["线性代数", "梯度下降", "模型评估指标"],
+        preferred_modalities=["图解", "代码案例"],
+        updated_at=state.now(),
+    ).model_dump()
+
+    result = ProfileValidator().evaluate_fusion(old_profile, new_profile, "我想完成课程项目，评估指标也容易混淆")
+
+    assert result["is_valid"] is True
+    assert result["confidence_score"] >= 0.75
+    assert result["requires_confirmation"] is False
+
+
+def test_profile_validator_detects_cliff_drop_and_empty_fields():
+    old_profile = state.Profile(
+        learning_goal="完成课程项目",
+        weak_points=["线性代数", "梯度下降", "模型评估指标"],
+        preferred_modalities=["图解", "代码案例", "短视频"],
+        updated_at=state.now(),
+    ).model_dump()
+    new_profile = {**old_profile, "learning_goal": "", "weak_points": [], "preferred_modalities": ["图解"]}
+
+    result = ProfileValidator().evaluate_fusion(old_profile, new_profile, "我最近每天40分钟")
+
+    assert result["is_valid"] is False
+    assert result["requires_confirmation"] is True
+    assert any("weak_points" in warning and "疑似画像信息丢失" in warning for warning in result["warnings"])
+    assert any("learning_goal 被清空" in warning for warning in result["warnings"])
+
+
+def test_profile_validator_detects_unknown_tags_and_bad_mastery():
+    old_profile = state.Profile(updated_at=state.now()).model_dump()
+    new_profile = {
+        **old_profile,
+        "preferred_modalities": ["星际传送门学习法"],
+        "mistake_patterns": ["!!!"],
+        "mastery": 1.4,
+    }
+
+    result = ProfileValidator().evaluate_fusion(old_profile, new_profile, "我想多看代码案例")
+
+    assert result["is_valid"] is False
+    assert result["requires_confirmation"] is True
+    assert any("未知或异常标签" in warning for warning in result["warnings"])
+    assert any("mastery 应为 0-1" in warning for warning in result["warnings"])
+
+
+def test_profile_versions_return_persisted_snapshots(monkeypatch):
+    original_profile = state.profile
+    test_db = Path(__file__).resolve().parents[1] / "data" / f"test_profile_versions_{uuid4().hex}.db"
+    monkeypatch.setattr(storage, "DB_PATH", test_db)
+    try:
+        state.profile = state.Profile(updated_at=state.now())
+        first = state.update_profile_from_message("我想多看 Python 代码案例")
+        second = state.update_profile_from_message("每天大概能学40分钟，线性代数不太好")
+
+        versions = state.profile_versions()
+
+        assert len(versions) >= 2
+        assert versions[0]["version"] == state.profile.version
+        assert {item["version"] for item in versions} >= {2, 3}
+        assert first["fusion_meta"]["source"] == "fallback"
+        assert second["fusion_meta"]["source"] == "fallback"
+
+        rolled_back = state.rollback_profile_version(2)
+
+        assert rolled_back is not None
+        assert rolled_back["profile"]["version"] == 2
+        assert state.profile.version == 2
+        assert rolled_back["learning_path"]["profile_version"] == 2
+    finally:
+        state.profile = original_profile
+        if test_db.exists():
+            try:
+                test_db.unlink()
+            except PermissionError:
+                pass
+
+
+def test_profile_endpoints_are_isolated_by_user_id(monkeypatch):
+    original_profile = state.profile
+    original_profiles = dict(state.profiles)
+    test_db = Path(__file__).resolve().parents[1] / "data" / f"test_profile_users_{uuid4().hex}.db"
+    monkeypatch.setattr(storage, "DB_PATH", test_db)
+    try:
+        state.profile = state.Profile(updated_at=state.now())
+        state.profiles = {}
+        user_a = {"X-User-Id": "anon-user-a"}
+        user_b = {"X-User-Id": "anon-user-b"}
+
+        first_a = payload(client.get("/api/profile/current", headers=user_a))
+        first_b = payload(client.get("/api/profile/current", headers=user_b))
+        assert first_a["id"] == "anon-user-a"
+        assert first_b["id"] == "anon-user-b"
+        assert payload(client.get("/api/profile/change-log", headers=user_a)) == []
+        assert payload(client.get("/api/profile/change-log", headers=user_b)) == []
+
+        updated_a = payload(client.post("/api/profile/chat", json={"message": "我想多看 Python 代码案例"}, headers=user_a))
+
+        assert updated_a["profile"]["version"] == 2
+        assert payload(client.get("/api/profile/change-log", headers=user_b)) == []
+        assert payload(client.get("/api/profile/current", headers=user_b))["version"] == 1
+        assert payload(client.get("/api/profile/versions", headers=user_a))[0]["version"] == 2
+        assert payload(client.get("/api/profile/versions", headers=user_b))[0]["version"] == 1
+    finally:
+        state.profile = original_profile
+        state.profiles = original_profiles
+        if test_db.exists():
+            try:
+                test_db.unlink()
+            except PermissionError:
+                pass
 
 
 def test_profile_fuse_uses_llm_semantic_profile_json():
@@ -202,21 +411,54 @@ def test_profile_fuse_uses_llm_semantic_profile_json():
     assert "线性代数" in fused.weak_points
     assert fused.version == current.version
     assert fused.updated_at == current.updated_at
-    assert "LLM语义融合完成" in reasoning
-    assert set(conflicts) >= {"knowledge_base", "learning_goal", "time_budget", "weak_points"}
+    assert "线性代数不太好" in reasoning
+    assert conflicts == ["time_budget: 每天30分钟 -> 每天40分钟；最新对话优先"]
+    assert agent.last_fusion_meta["source"] == "llm"
+    assert agent.last_fusion_meta["confidence"] == 0.91
+    assert agent.last_fusion_meta["changed_fields"] == ["knowledge_base", "learning_goal", "time_budget", "weak_points"]
+    assert "validation" in agent.last_fusion_meta
+
+
+def test_profile_fallback_normalizes_synonyms_and_implicit_weakness():
+    current = state.Profile(
+        knowledge_base=["Python 基础"],
+        preferred_modalities=["图解"],
+        weak_points=[],
+        updated_at=state.now(),
+    )
+    agent = ProfileAgent(MockLLMProvider())
+    extraction = agent.extract("Python还可以，但线性代数不太好，想多看 Python 代码案例", current)
+
+    fused, _, _ = agent.fuse(current, extraction, latest_message="Python还可以，但线性代数不太好，想多看 Python 代码案例")
+
+    assert fused.knowledge_base.count("Python") == 1
+    assert "线性代数薄弱" in fused.knowledge_base
+    assert "线性代数" in fused.weak_points
+    assert "代码案例" in fused.preferred_modalities
+    assert agent.last_fusion_meta["source"] == "fallback"
+    assert "validation" in agent.last_fusion_meta
 
 
 def test_generation_returns_resources_and_trace():
     data = payload(
         client.post(
             "/api/resources/generate",
-            json={"course": "人工智能导论", "chapter": "机器学习基础", "goal": "理解泛化与过拟合", "pain_points": ["公式迁移"]},
+            json={
+                "course": "人工智能导论",
+                "chapter": "机器学习基础",
+                "goal": "理解泛化与过拟合",
+                "pain_points": ["公式迁移"],
+                "resource_types": ["lecture_doc", "quiz", "media_script", "code_case"],
+            },
         )
     )
     assert data["status"] == "completed"
     assert data["events"][0]["type"] == "job_queued"
     assert data["events"][-1]["type"] == "job_completed"
-    assert len(data["resources"]) >= 6
+    assert len(data["resources"]) >= 4
+    assert data["plan_summary"]["total_estimated_time"] > 0
+    assert data["plan_summary"]["decisions"]
+    assert_fields(data["plan_summary"]["decisions"][0], {"resource_type", "priority", "difficulty", "reason"})
     assert len(data["traces"]) >= 8
     assert all("input_summary" in item and "output_summary" in item for item in data["traces"])
     assert all("source_refs" in item and "confidence" in item for item in data["traces"])
@@ -231,20 +473,78 @@ def test_generation_returns_resources_and_trace():
 
     resources_by_type = {item["type"]: item for item in data["resources"]}
     lecture = resources_by_type["lecture_doc"]["content"]
+    lecture_refs = resources_by_type["lecture_doc"]["source_refs"]
     quiz = json.loads(resources_by_type["quiz"]["content"])
     media_script = resources_by_type["media_script"]["content"]
     code_case = resources_by_type["code_case"]["content"]
 
     assert "核心概念速查" in lecture
     assert "| 概念 | 一句话解释 | 学习时要抓住 |" in lecture
+    assert "## 检索依据" in lecture
+    assert any(":" in ref for ref in lecture_refs)
     assert len(quiz) >= 4
     assert all("answer" in item for item in quiz)
     assert all("difficulty" in item and "assessment_point" in item for item in quiz)
     assert all("rubric" in item for item in quiz)
+    assert all("source_id" in item for item in quiz)
+    assert all("[来源:" in f"{item.get('question', '')}\n{item.get('explanation', '')}" for item in quiz)
     assert any("options" in item for item in quiz)
     assert "分镜脚本" in media_script
     assert "| 时间 | 画面 | 旁白 | 屏幕文字 |" in media_script
     assert "思考题" in code_case
+    assert "[来源:" in code_case
+
+
+def test_planner_agent_personalizes_resource_mix_by_profile():
+    profile = state.Profile(
+        mastery=0.24,
+        preferred_modalities=["图解"],
+        cognitive_style="例子驱动",
+        time_budget="每天 20 分钟",
+        weak_points=["概念混淆"],
+        mistake_patterns=["术语混淆"],
+        updated_at=state.now(),
+    )
+    request = state.GenerateRequest(
+        chapter="机器学习基础",
+        goal="先弄懂核心概念",
+        pain_points=["概念混淆"],
+    )
+    workflow_state = WorkflowState("job_planner_test", request, profile)
+
+    result = PlannerAgent(MockLLMProvider()).run(workflow_state)
+
+    assert 1 <= len(workflow_state.plan) <= 4
+    assert workflow_state.plan_details
+    assert workflow_state.learning_context["preferred_resources"] == workflow_state.plan_details
+    assert workflow_state.plan[0] in {"lecture_doc", "mind_map", "visual_card", "animation_demo", "quiz"}
+    assert any(item["reason"] for item in workflow_state.plan_details)
+    assert "预计学习" in result["summary"]
+
+
+def test_orchestrator_respects_planner_selected_resources():
+    profile = state.Profile(
+        mastery=0.24,
+        preferred_modalities=["图解"],
+        time_budget="每天 20 分钟",
+        weak_points=["概念混淆"],
+        mistake_patterns=["术语混淆"],
+        updated_at=state.now(),
+    )
+    request = state.GenerateRequest(
+        chapter="机器学习基础",
+        goal="先弄懂核心概念",
+        pain_points=["概念混淆"],
+    )
+
+    final_state = None
+    for _agent, workflow_state in Orchestrator().generate("job_planner_orchestrator_test", request, profile):
+        final_state = workflow_state
+
+    assert final_state is not None
+    assert final_state.plan
+    assert {resource.type for resource in final_state.resources} == set(final_state.plan)
+    assert len(final_state.resources) <= 4
 
 
 def test_knowledge_agent_reranks_sources_with_profile_context():
@@ -365,8 +665,16 @@ def test_api_contract_endpoints_return_documented_shapes():
     assert_fields(profile, PROFILE_FIELDS)
 
     profile_chat = payload(client.post("/api/profile/chat", json={"message": "Python"}))
-    assert_fields(profile_chat, {"profile", "extracted", "suggested_next_question", "version_change"})
+    assert_fields(profile_chat, {"profile", "extracted", "suggested_next_question", "version_change", "fusion_meta", "changed_fields"})
     assert_fields(profile_chat["profile"], PROFILE_FIELDS)
+
+    versions = payload(client.get("/api/profile/versions"))
+    assert isinstance(versions, list)
+    assert versions
+    assert_fields(versions[0], PROFILE_FIELDS)
+    rollback = payload(client.post(f"/api/profile/rollback/{profile_chat['profile']['version']}"))
+    assert_fields(rollback, {"profile", "learning_path"})
+    assert_fields(rollback["profile"], PROFILE_FIELDS)
 
     job = payload(
         client.post(
@@ -400,7 +708,14 @@ def test_api_contract_endpoints_return_documented_shapes():
     assert_fields(current_path, PATH_FIELDS)
     assert current_path["steps"]
 
-    tutor = payload(client.post("/api/tutor/chat", json={"question": "What is overfitting?", "resource_id": None}))
+    tutor = payload(client.post("/api/tutor/chat", json={
+        "question": "What is overfitting?",
+        "resource_id": None,
+        "history": [
+            {"role": "user", "content": "我不太理解训练集和测试集"},
+            {"role": "assistant", "content": "可以把训练集看成课堂练习。"},
+        ],
+    }))
     assert_fields(tutor, {"answer", "source_refs", "mermaid"})
 
     assessment = payload(client.post("/api/quiz/submit", json={"answers": ["generalization"], "resource_id": None}))
@@ -508,10 +823,24 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
             title="训练集、泛化和过拟合讲解",
             content_format="markdown",
             content=(
-                "训练集用于学习规律，泛化关注新数据表现。损失函数用于衡量预测差距，"
-                "过拟合会导致测试表现下降，需要结合机器学习基础中的方法适用条件、概念边界和案例分析。"
+                f"训练集用于学习规律，泛化关注新数据表现。[来源: {chapter_id}#detailed_concepts:01] "
+                f"损失函数用于衡量预测差距，过拟合会导致测试表现下降。[来源: {chapter_id}#misconceptions:01] "
+                "需要结合机器学习基础中的方法适用条件、概念边界和案例分析。"
             ),
-            source_refs=[f"{chapter_id}#detailed_concepts", f"{chapter_id}#misconceptions"],
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#detailed_concepts:01",
+                    "text": "训练集、泛化、损失函数和过拟合是机器学习基础中的关键概念。",
+                    "relevance_score": 0.93,
+                    "reason": "覆盖核心概念。",
+                },
+                {
+                    "id": f"{chapter_id}#misconceptions:01",
+                    "text": "过拟合会导致训练表现好但新数据表现下降。",
+                    "relevance_score": 0.91,
+                    "reason": "覆盖常见误区。",
+                },
+            ],
             difficulty="入门",
             target_profile=["例子驱动"],
             review_status="needs_revision",
@@ -537,7 +866,14 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
             title="无关练习",
             content_format="json",
             content='[{"question":"今天午饭吃什么","answer":"无关"}]',
-            source_refs=[f"{chapter_id}#not_exist"],
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#not_exist:01",
+                    "text": "训练集和泛化是机器学习基础中的概念。",
+                    "relevance_score": 0.3,
+                    "reason": "非法测试来源。",
+                }
+            ],
             difficulty="入门",
             target_profile=["练习"],
             review_status="needs_revision",
@@ -545,12 +881,59 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
             created_at=state.now(),
         ),
         Resource(
+            id="res_missing_evidence_text",
+            type="lecture_doc",
+            title="缺少证据原文",
+            content_format="markdown",
+            content=f"训练集和泛化相关。[来源: {chapter_id}#detailed_concepts:02]",
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#detailed_concepts:02",
+                    "text": "",
+                    "relevance_score": 0.8,
+                    "reason": "缺少原文测试。",
+                }
+            ],
+            difficulty="入门",
+            target_profile=["例子驱动"],
+            review_status="needs_revision",
+            created_by_agents=["LectureAgent"],
+            created_at=state.now(),
+        ),
+        Resource(
+            id="res_unknown_inline_ref",
+            type="lecture_doc",
+            title="错误正文引用",
+            content_format="markdown",
+            content=f"训练集和泛化相关。[来源: {chapter_id}#detailed_concepts:99]",
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#detailed_concepts:03",
+                    "text": "训练集和泛化是机器学习基础中的核心概念。",
+                    "relevance_score": 0.8,
+                    "reason": "用于测试正文引用映射。",
+                }
+            ],
+            difficulty="入门",
+            target_profile=["例子驱动"],
+            review_status="needs_revision",
+            created_by_agents=["LectureAgent"],
+            created_at=state.now(),
+        ),
+        Resource(
             id="res_blocked",
             type="lecture_doc",
             title="风险内容",
             content_format="markdown",
-            content="训练集 泛化 违法 内容",
-            source_refs=[f"{chapter_id}#detailed_concepts"],
+            content=f"训练集 泛化 违法 内容 [来源: {chapter_id}#detailed_concepts:01]",
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#detailed_concepts:01",
+                    "text": "训练集和泛化是机器学习基础中的概念。",
+                    "relevance_score": 0.8,
+                    "reason": "风险测试来源。",
+                }
+            ],
             difficulty="入门",
             target_profile=["例子驱动"],
             review_status="needs_revision",
@@ -568,10 +951,16 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
     assert resources["res_pass"].review_notes
 
     assert resources["res_missing_source"].review_status == "needs_revision"
-    assert "缺少 source_refs" in resources["res_missing_source"].audit_reason
+    assert "缺少 evidence_sources" in resources["res_missing_source"].audit_reason
 
     assert resources["res_invalid_source"].review_status == "needs_revision"
-    assert "无效来源引用" in "；".join(resources["res_invalid_source"].review_notes)
+    assert "无效证据来源" in "；".join(resources["res_invalid_source"].review_notes)
+
+    assert resources["res_missing_evidence_text"].review_status == "needs_revision"
+    assert "缺少证据原文" in "；".join(resources["res_missing_evidence_text"].review_notes)
+
+    assert resources["res_unknown_inline_ref"].review_status == "needs_revision"
+    assert "无法映射的正文引用" in "；".join(resources["res_unknown_inline_ref"].review_notes)
 
     assert resources["res_blocked"].review_status == "blocked"
     assert resources["res_blocked"].review_confidence == 0.35
