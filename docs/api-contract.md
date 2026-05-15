@@ -245,6 +245,12 @@ Accept: application/json
   "data": {
     "status": "healthy",
     "mock_llm": true,
+    "llm_provider": "mock",
+    "cache": {
+      "enabled": false,
+      "available": false,
+      "reason": "REDIS_URL not configured"
+    },
     "course": "人工智能导论"
   },
   "error": null
@@ -261,6 +267,8 @@ Accept: application/json
 | --- | --- | --- | --- |
 | status | string | 是 | 服务状态，正常为 `healthy` |
 | mock_llm | boolean | 是 | 是否使用 mock LLM |
+| llm_provider | string | 是 | 当前 LLM Provider 名称 |
+| cache | object | 是 | Redis 可选缓存状态；未配置时 `enabled=false`，系统仍使用 SQLite 正常运行 |
 | course | string | 是 | 当前课程名称 |
 
 #### 前端使用页面
