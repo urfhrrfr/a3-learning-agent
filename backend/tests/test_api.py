@@ -7,7 +7,7 @@ from uuid import uuid4
 
 os.environ.setdefault("LLM_PROVIDER", "mock")
 
-from app import state, storage
+from app import cache, state, storage
 from app.agents import KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
 from app.core.profile_normalizer import ProfileNormalizer
 from app.core.profile_validator import ProfileValidator
@@ -61,6 +61,26 @@ class SemanticFusionLLM(MockLLMProvider):
                 ],
                 "merge_reasoning": "合并 Python 近义标签，并将线性代数不太好识别为薄弱点。",
                 "confidence": 0.91,
+            },
+            ensure_ascii=False,
+        )
+
+
+class ReviewFactCheckLLM(MockLLMProvider):
+    name = "review-test"
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, prompt: str) -> str:
+        self.calls += 1
+        assert "待审核内容" in prompt
+        assert "关键事实点" in prompt
+        return json.dumps(
+            {
+                "is_accurate": False,
+                "reasoning": "测试模型认为内容需要复核",
+                "confidence": 0.88,
             },
             ensure_ascii=False,
         )
@@ -807,6 +827,62 @@ def test_llm_provider_factory_supports_spark_and_compatible_aliases(monkeypatch)
     for provider in ["openai", "openai_compatible", "deepseek", "qwen", "dashscope"]:
         monkeypatch.setenv("LLM_PROVIDER", provider)
         assert isinstance(get_llm_provider(), OpenAICompatibleProvider)
+
+
+def test_cache_is_optional_when_redis_url_is_missing(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    cache.reset_cache_client()
+
+    assert cache.status()["enabled"] is False
+    assert cache.cache_json("job", "job_disabled_cache", {"ok": True}) is False
+
+    health = payload(client.get("/api/health"))
+    assert health["cache"]["enabled"] is False
+    assert health["cache"]["available"] is False
+
+
+def test_job_endpoint_recovers_job_snapshot_from_redis_cache(monkeypatch):
+    class FakeRedis:
+        def __init__(self, payload: dict):
+            self.payload = payload
+
+        def get(self, key: str):
+            assert key == "a3:job:job_cached_snapshot"
+            return json.dumps(self.payload, ensure_ascii=False)
+
+    original_jobs = state.jobs
+    job = state.GenerationJob(
+        id="job_cached_snapshot",
+        status="completed",
+        progress=100,
+        current_step="job_completed",
+        request=state.GenerateRequest(chapter="鏈哄櫒瀛︿範鍩虹", goal="cache recovery"),
+        created_at=state.now(),
+        completed_at=state.now(),
+    )
+    monkeypatch.setattr(cache, "_redis_client", lambda: FakeRedis(job.model_dump()))
+    try:
+        state.jobs = {}
+        data = payload(client.get("/api/jobs/job_cached_snapshot"))
+
+        assert data["id"] == "job_cached_snapshot"
+        assert data["status"] == "completed"
+        assert state.jobs["job_cached_snapshot"].progress == 100
+    finally:
+        state.jobs = original_jobs
+
+
+def test_review_agent_attempts_real_llm_fact_check():
+    llm = ReviewFactCheckLLM()
+    agent = ReviewAgent(llm)
+    chapter = COURSE["chapters"][3]
+
+    result = agent._attempt_llm_fact_check("这段内容包含一个需要复核的机器学习事实。", chapter)
+
+    assert llm.calls == 1
+    assert result is not None
+    assert result["is_accurate"] is False
+    assert result["confidence"] == 0.88
 
 
 def test_review_agent_marks_passed_needs_revision_and_blocked():
