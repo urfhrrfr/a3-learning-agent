@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from . import state
+from .cache import status as cache_status
 from .knowledge import COURSE, question_bank
+from .storage import status as storage_status
 from .providers.base import LLMProviderError
 from .providers.factory import get_llm_provider
 from .schemas import ChatAndGenerateRequest, GenerateRequest, ProfileChatRequest, QuizSubmitRequest, ResourceAdjustRequest, ResourceFeedbackRequest, TutorExerciseSubmitRequest, TutorRequest, WeakPointConfirmRequest
@@ -156,7 +158,16 @@ def request_user_id(x_user_id: str | None = Header(default=None, alias="X-User-I
 @router.get("/health")
 def health():
     provider = get_llm_provider()
-    return ok({"status": "healthy", "mock_llm": provider.name == "mock", "llm_provider": provider.name, "course": COURSE["title"]})
+    return ok(
+        {
+            "status": "healthy",
+            "mock_llm": provider.name == "mock",
+            "llm_provider": provider.name,
+            "cache": cache_status(),
+            "storage": storage_status(),
+            "course": COURSE["title"],
+        }
+    )
 
 
 @router.post("/profile/chat")
@@ -291,7 +302,7 @@ def resources_generate_stream(payload: GenerateRequest):
 
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str):
-    job = state.jobs.get(job_id)
+    job = state.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return ok(job.model_dump())
@@ -299,7 +310,7 @@ def get_job(job_id: str):
 
 @router.get("/jobs/{job_id}/events")
 async def job_events(job_id: str):
-    job = state.jobs.get(job_id)
+    job = state.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 

@@ -8,6 +8,7 @@ from threading import Thread
 from uuid import uuid4
 
 from .agents import AssessmentAgent, Orchestrator, ProfileAgent, now
+from .cache import cache_job, get_cached_job
 from .path_planner import PathPlanner
 from .schemas import (
     AssessmentReport,
@@ -103,7 +104,33 @@ def event(job: GenerationJob, event_type: str, payload: dict):
 
 
 def persist_job(job: GenerationJob) -> None:
-    save_record("job", job.id, job.model_dump())
+    payload = job.model_dump()
+    save_record("job", job.id, payload)
+    cache_job(job.id, payload)
+
+
+def get_job(job_id: str) -> GenerationJob | None:
+    if job_id in jobs:
+        return jobs[job_id]
+
+    cached = get_cached_job(job_id)
+    if cached:
+        try:
+            job = GenerationJob(**cached)
+            jobs[job.id] = job
+            return job
+        except Exception:  # noqa: BLE001
+            pass
+
+    stored = next((item for item in load_records("job") if item.get("id") == job_id), None)
+    if stored:
+        try:
+            job = GenerationJob(**stored)
+            jobs[job.id] = job
+            return job
+        except Exception:  # noqa: BLE001
+            return None
+    return None
 
 
 def build_plan_summary(plan_details: list[dict]) -> PlanSummary:

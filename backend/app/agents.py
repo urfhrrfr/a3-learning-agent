@@ -1822,7 +1822,8 @@ class ReviewAgent(Agent):
 
     def _attempt_llm_fact_check(self, content: str, chapter: dict) -> dict | None:
         """尝试使用 LLM 进行事实校验"""
-        return None
+        if self.llm.name == "mock":
+            return None
         try:
             key_facts = chapter.get("concepts", []) + chapter.get("detailed_concepts", [])[:2]
             prompt = build_review_fact_check_prompt(content, chapter, key_facts)
