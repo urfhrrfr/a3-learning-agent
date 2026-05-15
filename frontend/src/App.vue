@@ -4,8 +4,8 @@
       <RouterLink class="brand" to="/">
         <span class="brand-mark">A3</span>
         <span>
-          <strong>学习智能体</strong>
-          <small>AI Learning Workspace</small>
+          <strong>A3 学习助手</strong>
+          <small>Personal Learning Studio</small>
         </span>
       </RouterLink>
       <nav class="topnav" aria-label="主导航">
@@ -28,20 +28,22 @@
       </div>
       <RouterView />
     </main>
+    <DemoGuide />
   </div>
 </template>
 
 <script setup lang="ts">
+import DemoGuide from './components/DemoGuide.vue'
 import { useLearningStore } from './store'
 
 const store = useLearningStore()
 const nav = [
-  { path: '/', label: '工作台' },
-  { path: '/profile', label: '学习画像' },
-  { path: '/generate', label: '资源生成' },
-  { path: '/resources', label: '资源库' },
-  { path: '/path', label: '学习路径' },
-  { path: '/tutor', label: '智能辅导' },
-  { path: '/assessment', label: '练习评估' }
+  { path: '/', label: '今日学习中心' },
+  { path: '/profile', label: '我的学习档案' },
+  { path: '/generate', label: '生成学习资料' },
+  { path: '/resources', label: '我的学习资料' },
+  { path: '/path', label: '我的学习任务' },
+  { path: '/tutor', label: '智能导师' },
+  { path: '/assessment', label: '学习结果' }
 ]
 </script>

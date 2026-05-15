@@ -13,6 +13,12 @@ export interface ApiResponse<T> {
 export interface HealthStatus {
   status: string
   mock_llm: boolean
+  llm_provider: string
+  cache: {
+    enabled: boolean
+    available: boolean
+    reason: string
+  }
   course: string
 }
 

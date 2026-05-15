@@ -1,113 +1,133 @@
 <template>
-  <div class="page">
-    <div class="header"><h1>学习画像</h1></div>
-    <div class="grid">
-      <ChatPanel class="span-7" :loading="loading" @send="send" />
-      <ProfileInsightPanel class="span-5" :profile="store.profile" />
-      <section class="panel span-12">
-        <div class="panel-title">
-          <h2>画像维度清单与更新规则</h2>
-        </div>
-        <table class="storyboard-table" v-if="dimensions.length">
-          <thead>
-            <tr>
-              <th>维度</th>
-              <th>字段</th>
-              <th>取值类型</th>
-              <th>定义</th>
-              <th>更新策略</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in dimensions" :key="item.key">
-              <td>{{ item.label }}</td>
-              <td><code>{{ item.key }}</code></td>
-              <td>{{ item.value_type }}</td>
-              <td>{{ item.description }}</td>
-              <td>{{ item.update_rule }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-      <section class="panel span-12">
+  <div class="page profile-center-page">
+    <section class="student-hero">
+      <div>
+        <span class="eyebrow">我的学习档案</span>
+        <h1>先看和我学习有关的事</h1>
+        <p>这里展示我的学习目标、薄弱点、学习偏好和系统建议。</p>
+      </div>
+      <div class="today-focus-card">
+        <span>系统给我的建议</span>
+        <strong>{{ primaryAdvice }}</strong>
+        <p>{{ adviceDetail }}</p>
+      </div>
+    </section>
+
+    <section class="student-summary-grid">
+      <article class="metric-tile">
+        <span>我的学习目标</span>
+        <strong>{{ store.profile?.learning_goal || '未填写' }}</strong>
+        <small>{{ store.profile?.course || '等待画像同步' }}</small>
+      </article>
+      <article class="metric-tile">
+        <span>我的薄弱点</span>
+        <strong>{{ weakPointCount }}</strong>
+        <small>{{ weakPointText }}</small>
+      </article>
+      <article class="metric-tile">
+        <span>学习偏好</span>
+        <strong>{{ preferenceText }}</strong>
+        <small>{{ store.profile?.time_budget || '时间安排未记录' }}</small>
+      </article>
+      <article class="metric-tile">
+        <span>当前章节</span>
+        <strong>{{ courseChapter }}</strong>
+        <small>雷达图仅表示画像信息完整度</small>
+      </article>
+    </section>
+
+    <div class="grid profile-center-grid">
+      <section class="panel span-5 profile-facts-card">
         <div class="panel-title">
           <div>
-            <h2>随学随新：画像更新记录</h2>
-            <p class="muted compact">默认只展示本次更新了什么、为什么更新，以及系统判断的可信程度。</p>
+            <h2>我现在适合怎么学</h2>
+            <p class="muted compact">这些建议来自已有画像字段，不补写后端没有的数据。</p>
           </div>
         </div>
-        <div v-if="changeLogs.length" class="profile-update-list">
-          <article class="profile-update-card" v-for="log in changeLogs.slice(0, 8)" :key="`${log.version}-${log.updated_at}`">
-            <div class="profile-update-head">
-              <div>
-                <span class="profile-version">v{{ log.version }}</span>
-                <h3>{{ summarizeChange(log) }}</h3>
-              </div>
-              <span class="confidence-badge" :class="confidenceClass(log)">
-                可信度 {{ formatConfidence(getConfidence(log)) }}
-              </span>
-            </div>
-            <p class="profile-update-reason">{{ getReason(log) }}</p>
-            <div class="profile-update-meta">
-              <span>来自：{{ sourceLabel(getSource(log)) }}</span>
-              <span>{{ formatUpdatedAt(log.updated_at) }}</span>
-            </div>
-            <div class="field-change-list" v-if="changedFieldKeys(log).length">
-              <div class="field-change" v-for="key in changedFieldKeys(log)" :key="key">
-                <span>{{ fieldLabel(key) }}</span>
-                <strong>{{ renderAfterValue(log, key) }}</strong>
-              </div>
-            </div>
-            <p v-else class="muted compact">这次对话没有改变已有画像字段。</p>
-            <details class="profile-evidence">
-              <summary>查看依据与版本细节</summary>
-              <div class="profile-evidence-grid">
-                <div>
-                  <span>触发语句</span>
-                  <p>{{ log.trigger_message || '未记录' }}</p>
-                </div>
-                <div>
-                  <span>识别到的信息</span>
-                  <div class="chips">
-                    <span class="chip" v-for="key in Object.keys(log.extracted)" :key="key">{{ fieldLabel(key) }}</span>
-                    <span v-if="!Object.keys(log.extracted).length" class="chip">暂无提取字段</span>
-                  </div>
-                </div>
-              </div>
-              <details class="profile-diff" v-if="hasFusionMeta(log)">
-                <summary>审计元信息</summary>
-                <pre>{{ renderFusionMeta(log) }}</pre>
-              </details>
-              <details class="profile-diff">
-                <summary>字段 before/after 对比</summary>
-                <pre>{{ renderChangedFields(log.changed_fields) }}</pre>
-              </details>
-            </details>
-          </article>
+        <div v-if="store.profile" class="profile-fact-list">
+          <div><span>学习目标</span><strong>{{ store.profile.learning_goal || '未填写' }}</strong></div>
+          <div><span>薄弱点</span><strong>{{ weakPointText }}</strong></div>
+          <div><span>喜欢的材料</span><strong>{{ preferenceText }}</strong></div>
+          <div><span>建议</span><strong>{{ adviceDetail }}</strong></div>
         </div>
-        <p v-else class="muted">暂无画像变更记录，发送一条画像对话后会自动记录。</p>
+        <div v-else class="empty small-empty">
+          <strong>画像尚未同步</strong>
+          <span>可以先通过对话补充学习目标和薄弱点。</span>
+        </div>
       </section>
+
+      <ProfileRadar
+        class="span-7"
+        :profile="store.profile"
+        :latest-confidence="latestConfidence"
+        :change-logs="changeLogs"
+      />
+
+      <WeakPointCloud class="span-7" :profile="store.profile" :report="store.report" :path="store.path" />
+      <ChatPanel class="span-5" :loading="loading" @send="send" />
+
+      <details class="system-details span-12">
+        <summary>查看更新记录</summary>
+        <section class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>最近学习档案更新</h2>
+              <p class="muted compact">只展示学生能理解的更新时间、更新原因和变化内容。</p>
+            </div>
+            <span class="status" :class="{ running: metaLoading, failed: Boolean(metaError) }">
+              {{ metaLoading ? '加载中' : metaError ? '加载受限' : `${changeLogs.length} 条` }}
+            </span>
+          </div>
+          <div v-if="metaError" class="empty error-state">
+            <strong>更新记录暂时不可用</strong>
+            <span>{{ metaError }}</span>
+            <button class="btn secondary" type="button" @click="loadProfileMeta">重试加载</button>
+          </div>
+          <div v-else-if="changeLogs.length" class="simple-update-list">
+            <article v-for="log in changeLogs.slice(0, 5)" :key="`${log.version}-${log.updated_at}`" class="simple-update-card">
+              <span>第 {{ log.version }} 次更新</span>
+              <strong>{{ log.fusion_reason || '根据最近对话更新学习档案' }}</strong>
+              <p>{{ log.trigger_message || '系统根据学习过程记录了新的信息。' }}</p>
+              <div class="chips" v-if="changedFieldLabels(log).length">
+                <span v-for="field in changedFieldLabels(log)" :key="field" class="chip">{{ field }}</span>
+              </div>
+              <small>{{ log.updated_at }}</small>
+            </article>
+          </div>
+          <div v-else-if="!metaLoading" class="empty small-empty">
+            <strong>暂无更新记录</strong>
+            <span>补充学习目标或完成练习后，这里会显示学习档案的更新。</span>
+          </div>
+        </section>
+      </details>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import ChatPanel from '../components/ChatPanel.vue'
-import ProfileInsightPanel from '../components/ProfileInsightPanel.vue'
-import { useLearningStore } from '../store'
-import type { ProfileChangeLog, ProfileDimension } from '../types'
+import ProfileRadar from '../components/ProfileRadar.vue'
+import WeakPointCloud from '../components/WeakPointCloud.vue'
+import { friendlyErrorMessage, useLearningStore } from '../store'
+import type { ProfileChangeLog } from '../types'
 
 const store = useLearningStore()
-const dimensions = ref<ProfileDimension[]>([])
 const changeLogs = ref<ProfileChangeLog[]>([])
+const metaLoading = ref(false)
+const metaError = ref('')
+const loading = ref(false)
 
 const fieldLabels: Record<string, string> = {
+  major: '专业',
+  education_level: '层次',
+  course: '课程',
+  current_chapter: '当前章节',
   knowledge_base: '知识基础',
   learning_goal: '学习目标',
   cognitive_style: '认知风格',
-  preferred_modalities: '偏好形式',
+  preferred_modalities: '资源偏好',
   time_budget: '时间安排',
   weak_points: '薄弱点',
   mistake_patterns: '错误模式',
@@ -115,10 +135,60 @@ const fieldLabels: Record<string, string> = {
   mastery: '掌握度'
 }
 
+const latestConfidence = computed(() => {
+  const latest = changeLogs.value
+    .map(log => log.fusion_meta?.confidence ?? log.extraction_confidence)
+    .find(value => typeof value === 'number')
+  return typeof latest === 'number' ? latest : undefined
+})
+
+const confidenceLabel = computed(() => {
+  if (typeof latestConfidence.value !== 'number') return '未记录'
+  return `${Math.round(latestConfidence.value * 100)}%`
+})
+
+const courseChapter = computed(() => {
+  if (!store.profile) return '未同步'
+  return `${store.profile.course} / ${store.profile.current_chapter}`
+})
+
+const weakPointCount = computed(() => {
+  const points = new Set<string>()
+  for (const point of store.profile?.weak_points || []) points.add(point)
+  for (const point of store.report?.weak_points || []) points.add(point)
+  return points.size
+})
+const weakPointText = computed(() => {
+  const points = [...new Set([...(store.profile?.weak_points || []), ...(store.report?.weak_points || [])])]
+  return points.length ? points.slice(0, 3).join('、') : '暂未识别'
+})
+const preferenceText = computed(() => {
+  const preferences = store.profile?.preferred_modalities?.filter(Boolean) || []
+  if (preferences.length) return preferences.slice(0, 3).join('、')
+  return store.profile?.cognitive_style || '未记录'
+})
+const primaryAdvice = computed(() => {
+  if (store.report?.weak_points?.length) return '先补薄弱点'
+  if (store.profile?.learning_goal) return '按目标学习'
+  return '先补充画像'
+})
+const adviceDetail = computed(() => {
+  if (store.report?.weak_points?.length) return `优先复习 ${store.report.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
+  if (store.profile?.weak_points?.length) return `先从 ${store.profile.weak_points.slice(0, 2).join('、')} 开始巩固。`
+  if (store.profile?.learning_goal) return '先生成一组学习资料，再按路径完成练习。'
+  return '填写学习目标和当前困惑后，系统会给出更具体建议。'
+})
+
 async function loadProfileMeta() {
-  const [dimensionRows, logs] = await Promise.all([api.profileDimensions(), api.profileChangeLog()])
-  dimensions.value = dimensionRows
-  changeLogs.value = logs
+  metaLoading.value = true
+  metaError.value = ''
+  try {
+    changeLogs.value = await api.profileChangeLog()
+  } catch (error) {
+    metaError.value = friendlyErrorMessage(error, '学习档案更新记录加载失败')
+  } finally {
+    metaLoading.value = false
+  }
 }
 
 onMounted(async () => {
@@ -126,96 +196,19 @@ onMounted(async () => {
   await loadProfileMeta()
 })
 
-const loading = ref(false)
-
 async function send(message: string) {
   loading.value = true
-  await store.sendProfileMessage(message)
-  await loadProfileMeta()
-  loading.value = false
-}
-
-function changedFieldKeys(log: ProfileChangeLog) {
-  return Object.keys(log.changed_fields || {})
-}
-
-function fieldLabel(key: string) {
-  const dimension = dimensions.value.find((item) => item.key === key)
-  return fieldLabels[key] || dimension?.label || key
-}
-
-function getConfidence(log: ProfileChangeLog) {
-  return log.fusion_meta?.confidence ?? log.extraction_confidence
-}
-
-function getSource(log: ProfileChangeLog) {
-  return log.fusion_meta?.source || log.extraction_source || 'unknown'
-}
-
-function getReason(log: ProfileChangeLog) {
-  return log.fusion_meta?.merge_reasoning || log.fusion_reason || '系统根据本次对话更新了学习画像。'
-}
-
-function summarizeChange(log: ProfileChangeLog) {
-  const fields = changedFieldKeys(log).map(fieldLabel)
-  if (!fields.length) return '本次画像未发生字段变化'
-  if (fields.length === 1) return `更新了「${fields[0]}」`
-  return `更新了 ${fields.length} 个画像维度`
-}
-
-function renderAfterValue(log: ProfileChangeLog, key: string) {
-  const value = log.changed_fields?.[key]?.after
-  if (Array.isArray(value)) return value.join('、') || '空'
-  if (value === null || value === undefined || value === '') return '空'
-  if (typeof value === 'object') return JSON.stringify(value)
-  return String(value)
-}
-
-function formatUpdatedAt(value: string) {
-  if (!value) return '时间未记录'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false })
-}
-
-function sourceLabel(source: string) {
-  const labels: Record<string, string> = {
-    llm: '模型识别',
-    fallback: '规则兜底',
-    user: '用户确认',
-    unknown: '未记录'
+  try {
+    await store.sendProfileMessage(message)
+    await loadProfileMeta()
+  } finally {
+    loading.value = false
   }
-  return labels[source] || source
 }
 
-function confidenceClass(log: ProfileChangeLog) {
-  const confidence = getConfidence(log)
-  if (typeof confidence !== 'number') return 'unknown'
-  if (confidence >= 0.75) return 'high'
-  if (confidence >= 0.45) return 'medium'
-  return 'low'
-}
-
-function renderChangedFields(changedFields: ProfileChangeLog['changed_fields']) {
-  return JSON.stringify(changedFields, null, 2)
-}
-
-function formatConfidence(confidence?: number) {
-  if (typeof confidence !== 'number') return '-'
-  return `${Math.round(confidence * 100)}%`
-}
-
-function hasFusionMeta(log: ProfileChangeLog) {
-  return Boolean(log.fusion_meta || log.conflicts?.length || log.fusion_reason)
-}
-
-function renderFusionMeta(log: ProfileChangeLog) {
-  return JSON.stringify({
-    source: getSource(log),
-    confidence: getConfidence(log),
-    changed_fields: log.fusion_meta?.changed_fields,
-    conflicts: log.fusion_meta?.conflicts || log.conflicts,
-    merge_reasoning: getReason(log)
-  }, null, 2)
+function changedFieldLabels(log: ProfileChangeLog) {
+  return Object.keys(log.changed_fields || {})
+    .map(key => fieldLabels[key] || key)
+    .slice(0, 5)
 }
 </script>

@@ -12,6 +12,29 @@
       <span class="status" :class="resource.review_status">{{ reviewStatusLabel }}</span>
     </div>
 
+    <div class="resource-intel-grid">
+      <article class="resource-intel-card">
+        <span>资源类型</span>
+        <strong>{{ resourceTypeLabel }}</strong>
+        <small>{{ contentFormatLabel }} · {{ resource.difficulty || '难度未返回' }}</small>
+      </article>
+      <article class="resource-intel-card">
+        <span>推荐原因</span>
+        <strong>{{ personalizationReason }}</strong>
+        <small>{{ resource.target_profile?.length ? '适合当前学习状态' : '暂无更多说明' }}</small>
+      </article>
+      <article class="resource-intel-card">
+        <span>内容检查</span>
+        <strong>{{ reviewStatusLabel }}</strong>
+        <small>{{ simpleReviewReason }}</small>
+      </article>
+      <article class="resource-intel-card">
+        <span>关联学习路径</span>
+        <strong>{{ relatedPathLabel }}</strong>
+        <small>{{ relatedPathHint }}</small>
+      </article>
+    </div>
+
     <template v-if="resource.type === 'animation_demo'">
       <div class="format-hero">
         <span>动画演示</span>
@@ -173,25 +196,25 @@
     </template>
 
     <details class="source-drawer">
-      <summary>依据与质检</summary>
+      <summary>这个资料来自哪里？</summary>
       <div class="source-drawer-body">
         <div>
-          <h3>内容依据</h3>
+          <h3>来源说明</h3>
           <div v-if="evidenceItems.length" class="source-list">
             <article v-for="(source, index) in evidenceItems" :key="source.id || index" class="source-item">
               <span>{{ sourceLabel(source.id, index) }}</span>
               <p>{{ source.text || '该来源暂未返回原文片段。' }}</p>
             </article>
           </div>
-          <p v-else class="muted compact">暂无可展示依据。</p>
+          <p v-else class="muted compact">暂无可展示来源说明。</p>
         </div>
         <div>
-          <h3>质检状态</h3>
+          <h3>内容检查状态</h3>
           <p class="compact">{{ friendlyAudit }}</p>
-          <p class="muted compact">置信度 {{ Math.round(resource.review_confidence * 100) }}%</p>
           <ul v-if="resource.review_notes?.length" class="audit-list">
-            <li v-for="note in resource.review_notes.slice(0, 4)" :key="note">{{ note }}</li>
+            <li v-for="note in resource.review_notes.slice(0, 2)" :key="note">{{ note }}</li>
           </ul>
+          <p v-else class="muted compact">暂无更多检查说明。</p>
         </div>
       </div>
     </details>
@@ -201,6 +224,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { EvidenceSource, Resource } from '../types'
+import { useLearningStore } from '../store'
 import MarkdownRenderer from './MarkdownRenderer.vue'
 import MermaidRenderer from './MermaidRenderer.vue'
 
@@ -255,6 +279,7 @@ interface AnimationPayload {
 }
 
 const props = defineProps<{ resource: Resource | null }>()
+const store = useLearningStore()
 const activeFrameIndex = ref(0)
 
 const typeLabels: Record<string, string> = {
@@ -313,9 +338,37 @@ const reviewStatusLabel = computed(() => {
 
 const friendlyAudit = computed(() => {
   if (!props.resource) return ''
-  if (props.resource.review_status === 'passed') return '这份内容已经通过系统质检。'
+  if (props.resource.review_status === 'passed') return '这份内容已经通过系统检查。'
   if (props.resource.review_status === 'needs_revision') return '这份内容可以查看，但系统建议继续完善依据或表达。'
   return '这份内容暂不建议使用。'
+})
+const simpleReviewReason = computed(() => {
+  const reason = props.resource?.audit_reason || props.resource?.review_reason || ''
+  if (!reason) return '暂无更多说明'
+  return reason.length > 42 ? `${reason.slice(0, 42)}...` : reason
+})
+
+const personalizationReason = computed(() => {
+  const targets = props.resource?.target_profile?.filter(Boolean) || []
+  if (targets.length) return targets.slice(0, 3).join('、')
+  return '暂无结构化推荐原因'
+})
+
+const relatedPathSteps = computed(() => {
+  if (!props.resource || !store.path?.steps?.length) return []
+  return store.path.steps.filter(step => step.recommended_resource_ids.includes(props.resource?.id || ''))
+})
+
+const relatedPathLabel = computed(() => {
+  if (!store.path?.steps?.length) return '路径未同步'
+  if (!relatedPathSteps.value.length) return '暂无关联阶段'
+  return `${relatedPathSteps.value.length} 个阶段`
+})
+
+const relatedPathHint = computed(() => {
+  if (!store.path?.steps?.length) return '当前还没有学习任务清单'
+  if (!relatedPathSteps.value.length) return '这份资料暂未出现在当前任务清单'
+  return relatedPathSteps.value.map(step => step.title).join('、')
 })
 
 const resourceShellClass = computed(() => {

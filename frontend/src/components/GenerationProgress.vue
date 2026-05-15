@@ -3,7 +3,7 @@
     <div class="panel-title">
       <div>
         <h2>生成进度</h2>
-        <p class="muted compact">{{ loading ? 'AI 正在协作生成学习资源' : statusText }}</p>
+        <p class="muted compact">{{ loading ? '正在为你准备学习资料' : statusText }}</p>
       </div>
       <span class="status" :class="{ running: loading }">{{ loading ? '生成中' : '待命' }}</span>
     </div>

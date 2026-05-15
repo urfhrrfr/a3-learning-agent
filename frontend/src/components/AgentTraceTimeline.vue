@@ -64,7 +64,7 @@ defineProps<{ traces: AgentTrace[] }>()
 
 const agentLabels: Record<string, string> = {
   KnowledgeAgent: '知识检索',
-  PlannerAgent: '资源规划',
+  PlannerAgent: '学习规划',
   LectureAgent: '讲解文档',
   MindMapAgent: '思维导图',
   QuizAgent: '练习题',

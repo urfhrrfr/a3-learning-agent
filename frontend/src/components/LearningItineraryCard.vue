@@ -2,8 +2,8 @@
   <section class="itinerary-card" aria-label="学习行程单">
     <div class="itinerary-head">
       <div>
-        <span class="itinerary-eyebrow">PlannerAgent 学习行程单</span>
-        <h2>按你的画像编排资源路径</h2>
+        <span class="itinerary-eyebrow">学习资料安排</span>
+        <h2>按你的目标编排资源顺序</h2>
       </div>
       <span class="time-pill">{{ totalEstimatedTime }} 分钟 / {{ budgetLabel }}</span>
     </div>
@@ -43,13 +43,13 @@
             <span class="reason-tag">{{ reasonTag(decision.reason) }}</span>
           </div>
 
-          <p class="reason-text">{{ decision.reason || 'PlannerAgent 将该资源纳入当前学习路径。' }}</p>
+          <p class="reason-text">{{ decision.reason || '系统将该资源纳入当前学习路径。' }}</p>
         </div>
       </article>
     </div>
 
     <div v-else class="empty-itinerary">
-      <strong>等待 PlannerAgent 生成行程</strong>
+      <strong>等待生成学习安排</strong>
       <span>生成资源后，这里会展示资源顺序、优先级和推荐理由。</span>
     </div>
   </section>

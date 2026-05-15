@@ -1,7 +1,7 @@
 <template>
   <section class="panel">
     <div class="panel-title">
-      <h2>练习提交</h2>
+      <h2>开始练习</h2>
       <span class="status">{{ questions.length ? `题目 ${currentIndex + 1}/${questions.length}` : '示例题' }}</span>
     </div>
 
@@ -9,6 +9,12 @@
       <span>{{ currentQuestion.type || '问答题' }}</span>
       <span>{{ currentQuestion.difficulty || currentQuestion.level || '基础' }}</span>
       <span v-if="currentQuestion.assessment_point">{{ currentQuestion.assessment_point }}</span>
+    </div>
+
+    <div v-if="!questions.length" class="empty small-empty">
+      <strong>还没有配套题库</strong>
+      <span>这是因为当前材料里没有练习题。你仍可以先做这道示例题体验反馈流程，或生成一套更贴合当前章节的题库。</span>
+      <RouterLink class="btn ghost" to="/generate">生成配套题库</RouterLink>
     </div>
 
     <p class="quiz-question">题目：{{ questionText }}</p>

@@ -1,64 +1,25 @@
 <template>
-  <div class="page generate-page">
-    <section class="workspace-hero">
-      <div class="workspace-copy">
-        <span class="eyebrow">AI 资源生成工作台</span>
-        <h1>把学习目标转成可审核、可复用的课程资源</h1>
-        <p class="muted">
-          输入章节、目标和薄弱点后，多智能体会协作生成讲解、导图、练习、阅读、脚本和代码案例。
-        </p>
+  <div class="page generate-page ai-studio-page">
+    <section class="student-hero">
+      <div>
+        <span class="eyebrow">生成学习资料</span>
+        <h1>告诉我你想学什么</h1>
+        <p>输入学习需求后，系统会生成讲解、导图、练习、脚本、代码等多种学习材料。</p>
       </div>
-      <div class="hero-actions">
-        <button class="btn ghost" type="button" :disabled="store.loading" @click="resetDraft">清空输入</button>
-        <button class="btn" type="button" :disabled="!canSubmit" @click="submitGeneration">
-          <span v-if="store.loading" class="btn-spinner" aria-hidden="true"></span>
-          {{ primaryActionText }}
-        </button>
+      <div class="today-focus-card">
+        <span>生成状态</span>
+        <strong>{{ store.loading ? `${Math.round(store.progress)}%` : store.resources.length ? '已生成' : '待提交' }}</strong>
+        <small>{{ store.loading ? friendlyGenerationStep : resultSubtitle }}</small>
       </div>
     </section>
 
-    <div class="ai-workspace">
-      <aside class="workspace-side">
-        <section class="panel compact-panel">
-          <div class="panel-title">
-            <h2>快捷模板</h2>
-            <span class="muted">{{ promptTemplates.length }} 个</span>
-          </div>
-          <div class="template-list">
-            <button
-              v-for="template in promptTemplates"
-              :key="template.title"
-              class="template-item"
-              type="button"
-              @click="applyTemplate(template.prompt)"
-            >
-              <strong>{{ template.title }}</strong>
-              <span>{{ template.prompt }}</span>
-            </button>
-          </div>
-        </section>
-
-        <section class="panel compact-panel">
-          <div class="panel-title">
-            <h2>最近任务</h2>
-            <span class="muted">{{ store.resources.length ? '已生成' : '暂无' }}</span>
-          </div>
-          <div v-if="recentResources.length" class="history-list">
-            <button v-for="resource in recentResources" :key="resource.id" class="history-item" type="button" @click="selected = resource">
-              <span>{{ resource.title }}</span>
-              <small>{{ resource.content_format }} · {{ resource.review_status }}</small>
-            </button>
-          </div>
-          <div v-else class="empty small-empty">生成完成后会在这里保留最近资源。</div>
-        </section>
-      </aside>
-
-      <main class="workspace-core">
-        <section class="panel composer-panel">
+    <div class="quiet-workspace">
+      <main class="studio-main">
+        <section class="panel composer-panel studio-composer">
           <div class="panel-title">
             <div>
-              <h2>输入生成任务</h2>
-              <p class="muted compact">Enter 提交，Shift + Enter 换行</p>
+              <h2>你想学什么</h2>
+              <p class="muted compact">写下章节、目标或卡住的地方，系统会整理成多模态学习资料。</p>
             </div>
             <span class="status" :class="{ running: store.loading }">{{ inputStateLabel }}</span>
           </div>
@@ -71,40 +32,60 @@
             @keydown.enter.exact.prevent="submitGeneration"
           ></textarea>
           <div class="composer-footer">
-            <span class="muted">{{ draftPrompt.length }} 字 · {{ store.profile?.current_chapter || '默认章节' }}</span>
-            <div class="split">
-              <button v-if="store.loading" class="btn secondary" type="button" disabled>停止生成</button>
-              <button class="btn" type="button" :disabled="!canSubmit" @click="submitGeneration">
+            <div class="prompt-helper studio-helper">
+              <span>当前画像</span>
+              <strong>{{ profileHint }}</strong>
+            </div>
+            <div class="studio-actions">
+              <button class="btn ghost" type="button" :disabled="store.loading" @click="resetDraft">清空</button>
+              <button class="btn hero-primary" type="button" :disabled="!canSubmit" @click="submitGeneration">
                 <span v-if="store.loading" class="btn-spinner" aria-hidden="true"></span>
                 {{ primaryActionText }}
               </button>
             </div>
           </div>
+          <div class="resource-type-picker">
+            <span>想生成的资源类型</span>
+            <div class="segmented-options">
+              <button type="button" :class="{ active: outputMode === 'all' }" :disabled="store.loading" @click="outputMode = 'all'">完整资料包</button>
+              <button type="button" :class="{ active: outputMode === 'lesson' }" :disabled="store.loading" @click="outputMode = 'lesson'">讲解优先</button>
+              <button type="button" :class="{ active: outputMode === 'practice' }" :disabled="store.loading" @click="outputMode = 'practice'">练习优先</button>
+            </div>
+          </div>
         </section>
 
-        <GenerationProgress :progress="store.progress" :loading="store.loading" :current-step="store.currentStep" />
-        <LearningItineraryCard
-          :plan-summary="store.planSummary"
-          :time-budget="store.profile?.time_budget"
-        />
+        <div class="studio-status-grid">
+          <GenerationProgress :progress="store.progress" :loading="store.loading" :current-step="friendlyGenerationStep" />
+        </div>
 
-        <section class="panel result-panel">
+        <section class="panel multimodal-panel">
+          <div class="panel-title">
+            <div>
+              <h2>本次可生成的材料类型</h2>
+              <p class="muted compact">可以按学习目标生成不同形式的资料。</p>
+            </div>
+          </div>
+          <div class="multimodal-strip">
+            <span v-for="item in multimodalTypes" :key="item">{{ item }}</span>
+          </div>
+        </section>
+
+        <section class="panel result-panel studio-result-panel">
           <div class="panel-title">
             <div>
               <h2>生成结果</h2>
               <p class="muted compact">{{ resultSubtitle }}</p>
             </div>
             <div class="result-actions">
-              <button class="icon-btn with-border" type="button" :disabled="!selected" title="复制摘要" @click="copySummary">复制</button>
-              <button class="icon-btn with-border" type="button" :disabled="!store.resources.length || store.loading" title="重新生成" @click="submitGeneration">重试</button>
-              <button class="icon-btn with-border" type="button" :disabled="!selected" title="导出资源" @click="showToast('已准备导出当前资源')">导出</button>
+              <button class="icon-btn with-border" type="button" :disabled="!selected" title="复制摘要" @click="copySummary">复制摘要</button>
+              <button class="icon-btn with-border" type="button" :disabled="!store.resources.length || store.loading || !draftPrompt.trim()" title="重新生成" @click="submitGeneration">重新生成</button>
             </div>
           </div>
 
           <div v-if="store.loading" class="generating-state">
             <div class="stream-line">
               <span class="spinner"></span>
-              <strong>{{ store.currentStep || '正在生成' }}</strong>
+              <strong>{{ friendlyGenerationStep || '正在生成' }}</strong>
             </div>
             <div class="skeleton-lines" aria-hidden="true">
               <span></span>
@@ -116,7 +97,7 @@
           <div v-else-if="store.error" class="empty error-state">
             <strong>生成失败</strong>
             <span>{{ store.error }}</span>
-            <button class="btn secondary" type="button" @click="submitGeneration">重试</button>
+            <button class="btn secondary" type="button" :disabled="!draftPrompt.trim()" @click="submitGeneration">重试</button>
           </div>
 
           <div v-else-if="store.resources.length" class="cards result-cards">
@@ -131,9 +112,15 @@
 
           <div v-else class="empty empty-prompts">
             <strong>还没有生成结果</strong>
-            <span>选择一个模板或输入学习目标，系统会生成可审核的多格式资源。</span>
+            <span>输入学习需求后，这里会展示可学习的资源卡片。</span>
             <div class="chips">
-              <button v-for="template in promptTemplates.slice(0, 3)" :key="template.title" class="chip chip-button" type="button" @click="applyTemplate(template.prompt)">
+              <button
+                v-for="template in promptTemplates.slice(0, 3)"
+                :key="template.title"
+                class="chip chip-button"
+                type="button"
+                @click="applyTemplate(template.prompt)"
+              >
                 {{ template.title }}
               </button>
             </div>
@@ -143,37 +130,25 @@
         <ResourceContent v-if="selected" :resource="selected" />
       </main>
 
-      <aside class="workspace-side">
-        <section class="panel compact-panel">
-          <div class="panel-title">
-            <h2>生成参数</h2>
-            <span class="status">影响下次生成</span>
+      <details class="system-details">
+        <summary>系统怎么生成资料？</summary>
+        <div class="panel user-explain-panel">
+          <div class="explain-grid">
+            <article>
+              <span>第一步</span>
+              <strong>理解你的学习目标和薄弱点</strong>
+            </article>
+            <article>
+              <span>第二步</span>
+              <strong>整理成讲义、导图、练习等材料</strong>
+            </article>
+            <article>
+              <span>第三步</span>
+              <strong>检查内容是否清楚、可靠、适合学习</strong>
+            </article>
           </div>
-          <label class="field-label">
-            <span>模型策略</span>
-            <select v-model="modelMode" :disabled="store.loading">
-              <option value="balanced">平衡质量与速度</option>
-              <option value="creative">更强创造性</option>
-              <option value="strict">更严格审核</option>
-            </select>
-          </label>
-          <label class="field-label">
-            <span>输出格式</span>
-            <select v-model="outputMode" :disabled="store.loading">
-              <option value="all">全量资源包</option>
-              <option value="lesson">讲解优先</option>
-              <option value="practice">练习优先</option>
-            </select>
-          </label>
-          <label class="field-label">
-            <span>生成深度</span>
-            <input v-model.number="depth" type="range" min="1" max="3" :disabled="store.loading" />
-          </label>
-          <p class="muted compact">参数变更会在下一次提交时生效，不会改写当前结果。</p>
-        </section>
-
-        <AgentTraceTimeline :traces="store.traces" />
-      </aside>
+        </div>
+      </details>
     </div>
 
     <div v-if="toast" class="toast" role="status">{{ toast }}</div>
@@ -185,8 +160,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useLearningStore } from '../store'
 import type { Resource } from '../types'
 import GenerationProgress from '../components/GenerationProgress.vue'
-import LearningItineraryCard from '../components/LearningItineraryCard.vue'
-import AgentTraceTimeline from '../components/AgentTraceTimeline.vue'
 import ResourceCard from '../components/ResourceCard.vue'
 import ResourceContent from '../components/ResourceContent.vue'
 
@@ -199,34 +172,45 @@ const store = useLearningStore()
 const selected = ref<Resource | null>(null)
 const draftPrompt = ref('')
 const toast = ref('')
-const modelMode = ref('balanced')
 const outputMode = ref('all')
-const depth = ref(2)
 
 const promptTemplates: PromptTemplate[] = [
-  { title: '章节讲解', prompt: '为当前章节生成一份循序渐进的讲解材料，包含核心概念、例子和常见误区。' },
-  { title: '导图 + 练习', prompt: '生成一张知识导图和 5 道分层练习题，帮助我检查概念理解。' },
-  { title: '视频脚本', prompt: '把本章内容改写成 3 分钟教学视频脚本，包含分镜、旁白和屏幕文字。' },
-  { title: '代码案例', prompt: '生成一个可运行的代码案例，用最小示例解释本章关键算法。' }
+  { title: '概念讲清楚', prompt: '我想学习当前章节，请用循序渐进的方式讲清核心概念、生活化例子和常见误区。' },
+  { title: '边学边练', prompt: '请为当前章节生成一张知识导图和 5 道分层练习题，帮助我检查概念理解。' },
+  { title: '快速复习', prompt: '请把本章内容整理成 10 分钟复习材料，包含重点清单、易错点和最后自测题。' },
+  { title: '代码案例', prompt: '请生成一个可运行的代码案例，用最小示例解释本章关键算法，并说明每一步在做什么。' }
 ]
+const multimodalTypes = ['图文讲解', '思维导图', '互动练习', '视频脚本', '动画演示', '代码案例', 'PPT 草稿', '学习卡片']
 
 const canSubmit = computed(() => !store.loading && draftPrompt.value.trim().length > 0)
-const recentResources = computed(() => store.resources.slice(0, 4))
-const primaryActionText = computed(() => store.loading ? '生成中...' : '开始生成')
+const primaryActionText = computed(() => store.loading ? '正在生成资料...' : '开始生成')
 const inputStateLabel = computed(() => {
-  if (store.loading) return '已提交'
+  if (store.loading) return '生成中'
   if (draftPrompt.value.trim()) return '可提交'
   return '等待输入'
 })
 const resultSubtitle = computed(() => {
-  if (store.loading) return '正在分析任务并生成多格式资源'
-  if (store.resources.length) return `已生成 ${store.resources.length} 份资源，可继续查看、复制或反馈`
-  return '结果会在任务完成后出现在这里'
+  if (store.loading) return friendlyGenerationStep.value
+  if (store.resources.length) return `已生成 ${store.resources.length} 份资源，点击卡片开始学习`
+  return '提交学习需求后，资源包会出现在这里'
+})
+const friendlyGenerationStep = computed(() => {
+  const text = store.currentStep || ''
+  if (text.includes('profile') || text.includes('画像') || text.includes('理解')) return '正在理解你的学习目标'
+  if (text.includes('quiz') || text.includes('练习')) return '正在生成练习题'
+  if (text.includes('review') || text.includes('审核') || text.includes('质检')) return '正在检查内容可靠性'
+  if (text.includes('path') || text.includes('plan') || text.includes('规划')) return '正在整理学习建议'
+  return '正在生成讲义和学习资料'
+})
+const profileHint = computed(() => {
+  if (!store.profile) return '暂无画像，后端会使用默认学习画像。'
+  return `${store.profile.course} / ${store.profile.current_chapter} / 目标：${store.profile.learning_goal}`
 })
 
 onMounted(async () => {
   await store.ensureReady()
   hydrateDraft()
+  selected.value = store.resources[0] || null
 })
 
 function hydrateDraft() {

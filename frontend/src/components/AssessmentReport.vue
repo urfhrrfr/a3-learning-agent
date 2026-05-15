@@ -1,7 +1,7 @@
 <template>
   <section class="panel">
     <div class="panel-title">
-      <h2>评估报告</h2>
+      <h2>练习反馈</h2>
       <span v-if="report" class="status">{{ report.created_at }}</span>
     </div>
     <template v-if="report">
@@ -18,18 +18,25 @@
       <p>{{ report.feedback }}</p>
       <div class="report-section">
         <b>优势表现</b>
-        <div class="chips"><span class="chip" v-for="item in report.strengths" :key="item">{{ item }}</span></div>
+        <div v-if="report.strengths.length" class="chips"><span class="chip" v-for="item in report.strengths" :key="item">{{ item }}</span></div>
+        <p v-else class="muted compact">本次报告暂未返回优势标签。</p>
       </div>
       <div class="report-section">
         <b>薄弱点</b>
-        <div class="chips"><span class="chip warning" v-for="item in report.weak_points" :key="item">{{ item }}</span></div>
+        <div v-if="report.weak_points.length" class="chips"><span class="chip warning" v-for="item in report.weak_points" :key="item">{{ item }}</span></div>
+        <p v-else class="muted compact">暂未识别到新的薄弱点，可以继续提交练习获得更明确的诊断。</p>
       </div>
       <div class="report-section">
         <b>错误模式</b>
-        <div class="chips"><span class="chip" v-for="item in report.mistake_patterns" :key="item">{{ item }}</span></div>
+        <div v-if="report.mistake_patterns.length" class="chips"><span class="chip" v-for="item in report.mistake_patterns" :key="item">{{ item }}</span></div>
+        <p v-else class="muted compact">本次没有明显错误模式。</p>
       </div>
     </template>
-    <div v-else class="empty">提交练习后展示评分、掌握度变化、薄弱点和路径调整建议。</div>
+    <div v-else class="empty">
+      <strong>还没有反馈报告</strong>
+      <span>这是因为你还没有提交练习。完成左侧题目后，这里会展示评分、掌握度变化、薄弱点和路径调整建议。</span>
+      <RouterLink class="btn ghost" to="/assessment">完成一次练习</RouterLink>
+    </div>
   </section>
 </template>
 

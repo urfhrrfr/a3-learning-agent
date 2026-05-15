@@ -1,9 +1,26 @@
 <template>
-  <div class="page">
-    <div class="header"><h1>智能辅导</h1></div>
-    <div class="grid">
-      <section class="panel span-4">
-        <h2>提问</h2>
+  <div class="page tutor-center-page">
+    <section class="student-hero">
+      <div>
+        <span class="eyebrow">智能导师</span>
+        <h1>像聊天一样把问题问清楚</h1>
+        <p>提出问题后，导师会给出解释、下一步建议和小练习；需要时可以展开查看回答依据。</p>
+      </div>
+      <div class="today-focus-card">
+        <span>当前学习状态</span>
+        <strong>{{ store.profile ? `${Math.round(store.profile.mastery * 100)}%` : '-' }}</strong>
+        <p>{{ profileSummary }}</p>
+      </div>
+    </section>
+
+    <div class="grid tutor-center-grid">
+      <section class="panel span-4 tutor-question-panel">
+        <div class="panel-title">
+          <div>
+            <h2>问题输入</h2>
+            <p class="muted compact">可以直接问概念、题目或材料里没看懂的地方。</p>
+          </div>
+        </div>
         <label class="field">
           <span>引用资源</span>
           <select v-model="selectedResourceId" :disabled="asking">
@@ -13,69 +30,71 @@
             </option>
           </select>
         </label>
-        <textarea rows="6" v-model="question" placeholder="输入你想追问的概念、例题或学习困惑"></textarea>
-        <div class="split">
-          <button class="btn" :disabled="asking || !question.trim()" @click="ask">
-            {{ asking ? '思考中...' : '发送' }}
+        <div v-if="!store.resources.length" class="empty small-empty">
+          <strong>暂无可引用资源</strong>
+          <span>导师会先结合学习画像和通用课程知识回答；生成资源后将展示依据。</span>
+          <RouterLink class="btn ghost" to="/generate">生成可引用资源</RouterLink>
+        </div>
+        <textarea rows="7" v-model="question" placeholder="例如：我看不懂过拟合和泛化的区别，可以用一个例子解释吗？"></textarea>
+        <div class="resource-actions">
+          <button class="btn hero-primary" :disabled="asking || !question.trim()" @click="ask">
+            {{ asking ? '思考中...' : '发送问题' }}
           </button>
           <button class="btn secondary" :disabled="asking || !messages.length" @click="clearChat">清空对话</button>
         </div>
-        <span v-if="asking" class="inline-state">正在结合画像、资源和最近对话生成回答</span>
-        <div v-if="localError" class="empty">{{ localError }}</div>
-        <div class="trace-badges tutor-meta">
-          <span class="chip provider">{{ providerLabel }}</span>
-          <span class="chip" :class="usedFallback ? 'warning' : 'success'">{{ usedFallback ? '模板兜底' : '大模型回答' }}</span>
+        <span v-if="asking" class="inline-state">正在生成回答</span>
+        <div v-if="localError" class="empty error-state">
+          <strong>导师暂时没有返回答案</strong>
+          <span>{{ localError }}</span>
+          <button class="btn secondary" type="button" :disabled="asking || !lastFailedQuestion" @click="retryLastQuestion">重试上一问</button>
         </div>
-        <p v-if="fallbackReason" class="review-note">兜底原因：{{ fallbackReason }}</p>
-        <div v-if="profileSuggestion" class="profile-nudge">
-          <p>{{ profileSuggestion.message }}</p>
-          <button
-            v-if="!profileSuggestion.already_exists"
-            class="btn secondary"
-            type="button"
-            :disabled="confirmingWeakPoint"
-            @click="confirmWeakPoint"
-          >
-            {{ confirmingWeakPoint ? '写入中...' : '加入薄弱点' }}
-          </button>
-        </div>
-        <div v-if="personalization" class="tutor-profile">
-          <span class="chip success">偏好：{{ personalization.preferred_mode }}</span>
-          <span v-for="point in personalization.weak_points.slice(0, 3)" :key="point" class="chip warning">{{ point }}</span>
-        </div>
-        <p v-if="sourceRefs.length" class="muted compact">引用来源用于说明回答依据的课程片段。</p>
-        <div class="chips" v-if="sourceRefs.length">
-          <span v-for="ref in sourceRefs" :key="ref" class="chip">{{ ref }}</span>
-        </div>
-        <div v-if="citedResources.length" class="tutor-block">
-          <b>本次引用</b>
-          <span v-for="resource in citedResources" :key="resource.id">{{ resource.title }} · {{ resource.difficulty }}</span>
-        </div>
-        <div v-if="nextStep" class="tutor-block">
-          <b>下一步</b>
-          <strong>{{ nextStep.title }}</strong>
-          <span>{{ nextStep.objective }}</span>
-          <small>{{ nextStep.estimated_minutes }} 分钟 · {{ nextStep.reason }}</small>
-        </div>
-        <div v-if="exercise" class="tutor-exercise">
-          <b>针对当前困惑的小练习</b>
-          <p>{{ exercise.prompt }}</p>
-          <small>{{ exercise.hint }}</small>
-          <textarea rows="4" v-model="exerciseAnswer" placeholder="写下你的理解，导师会即时评估"></textarea>
-          <button class="btn" type="button" :disabled="submittingExercise || !exerciseAnswer.trim()" @click="submitExercise">
-            {{ submittingExercise ? '评估中...' : '提交练习' }}
-          </button>
-        </div>
-        <div v-if="exerciseResult" class="tutor-result">
-          <b>练习反馈 · {{ exerciseResult.score }} 分</b>
-          <p>{{ exerciseResult.feedback }}</p>
-          <small>掌握度变化：{{ Math.round(exerciseResult.mastery_delta * 100) }}%</small>
-        </div>
+
       </section>
 
-      <section class="panel span-8">
+      <main class="span-8 tutor-main-stack">
+        <TutorAnswerPanel
+          :answer="latestAnswer"
+          :loading="asking"
+          :next-step="nextStep"
+          :exercise="exercise"
+          v-model:exercise-answer="exerciseAnswer"
+          :exercise-result="exerciseResult"
+          :submitting-exercise="submittingExercise"
+          @submit-exercise="submitExercise"
+        />
+        <MermaidRenderer v-if="mermaid" :content="mermaid" />
+      </main>
+
+      <details class="system-details span-12">
+        <summary>为什么这样回答？</summary>
+        <section class="panel user-explain-panel">
+          <div class="explain-grid">
+            <article v-for="item in answerReasons" :key="item.title">
+              <span>{{ item.title }}</span>
+              <strong>{{ item.text }}</strong>
+            </article>
+          </div>
+          <div v-if="profileSuggestion" class="profile-nudge">
+            <p>{{ profileSuggestion.message }}</p>
+            <button
+              v-if="!profileSuggestion.already_exists"
+              class="btn secondary"
+              type="button"
+              :disabled="confirmingWeakPoint"
+              @click="confirmWeakPoint"
+            >
+              {{ confirmingWeakPoint ? '写入中...' : '加入薄弱点' }}
+            </button>
+          </div>
+        </section>
+      </details>
+
+      <section class="panel span-12">
         <div class="panel-title">
-          <h2>连续对话</h2>
+          <div>
+            <h2>最近对话</h2>
+            <p class="muted compact">保留本页本地对话历史，用于继续追问。</p>
+          </div>
         </div>
         <div class="chat-thread" v-if="messages.length">
           <article v-for="(message, index) in messages" :key="index" class="chat-bubble" :class="message.role">
@@ -84,9 +103,10 @@
           </article>
         </div>
         <div v-else class="empty">
-          你可以从任意课程问题开始，后续追问会带上最近对话上下文。
+          <strong>还没有对话</strong>
+          <span>发送第一个问题后，导师回答和上下文会展示在这里。</span>
+          <button class="btn secondary" type="button" @click="question = '什么是过拟合？请用一个新手能理解的例子解释。'">填入示例问题</button>
         </div>
-        <MermaidRenderer v-if="mermaid" :content="mermaid" />
       </section>
     </div>
   </div>
@@ -95,9 +115,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
-import { useLearningStore } from '../store'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import MermaidRenderer from '../components/MermaidRenderer.vue'
+import TutorAnswerPanel from '../components/TutorAnswerPanel.vue'
+import { friendlyErrorMessage, useLearningStore } from '../store'
 import type { TutorExercise, TutorExerciseResult, TutorMessage, TutorNextStep, TutorResponse } from '../types'
 
 const question = ref('')
@@ -111,6 +132,7 @@ const sourceRefs = ref<string[]>([])
 const asking = ref(false)
 const confirmingWeakPoint = ref(false)
 const localError = ref('')
+const lastFailedQuestion = ref('')
 const profileSuggestion = ref<TutorResponse['profile_suggestion']>(null)
 const personalization = ref<TutorResponse['personalization'] | null>(null)
 const citedResources = ref<NonNullable<TutorResponse['cited_resources']>>([])
@@ -125,11 +147,44 @@ onMounted(() => {
   store.ensureReady()
 })
 
+const latestAnswer = computed(() => [...messages.value].reverse().find(message => message.role === 'assistant')?.content || '')
+const selectedResource = computed(() => store.resources.find(resource => resource.id === selectedResourceId.value) || null)
+const profileSummary = computed(() => {
+  if (!store.profile) return '等待画像同步'
+  return `${store.profile.current_chapter} · ${store.profile.weak_points.slice(0, 2).join('、') || '薄弱点待识别'}`
+})
 const providerLabel = computed(() => {
   if (provider.value === 'spark') return '星火模型'
   if (provider.value === 'openai_compatible') return '兼容大模型'
   if (provider.value === 'mock') return 'Mock'
   return provider.value || '未提问'
+})
+const answerReasons = computed(() => {
+  const reasons = [
+    {
+      title: '结合学习目标',
+      text: store.profile?.learning_goal || '你还没有填写明确学习目标'
+    },
+    {
+      title: '针对薄弱点',
+      text: personalization.value?.weak_points?.length
+        ? personalization.value.weak_points.slice(0, 3).join('、')
+        : store.profile?.weak_points?.slice(0, 3).join('、') || '暂未识别薄弱点'
+    },
+    {
+      title: '符合学习偏好',
+      text: personalization.value?.preferred_modalities?.length
+        ? personalization.value.preferred_modalities.slice(0, 3).join('、')
+        : store.profile?.preferred_modalities?.slice(0, 3).join('、') || '会尽量用清晰例子解释'
+    }
+  ]
+  if (selectedResource.value || citedResources.value.length) {
+    reasons.push({
+      title: '参考学习资料',
+      text: selectedResource.value?.title || citedResources.value.map(item => item.title).slice(0, 2).join('、')
+    })
+  }
+  return reasons
 })
 
 async function ask() {
@@ -155,8 +210,10 @@ async function ask() {
     exercise.value = data.exercise || null
     exerciseAnswer.value = ''
     exerciseResult.value = null
+    lastFailedQuestion.value = ''
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : String(error)
+    localError.value = friendlyErrorMessage(error, '智能辅导请求失败')
+    lastFailedQuestion.value = text
     messages.value.pop()
   } finally {
     asking.value = false
@@ -183,7 +240,7 @@ async function submitExercise() {
       content: `练习反馈：${data.feedback}\n\n下一步建议：${data.next_step?.title || '继续巩固当前概念'}`
     })
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : String(error)
+    localError.value = friendlyErrorMessage(error, '练习反馈提交失败')
   } finally {
     submittingExercise.value = false
   }
@@ -209,10 +266,16 @@ async function confirmWeakPoint() {
       weak_points: data.profile.weak_points
     }
   } catch (error) {
-    localError.value = error instanceof Error ? error.message : String(error)
+    localError.value = friendlyErrorMessage(error, '薄弱点确认失败')
   } finally {
     confirmingWeakPoint.value = false
   }
+}
+
+function retryLastQuestion() {
+  if (!lastFailedQuestion.value) return
+  question.value = lastFailedQuestion.value
+  void ask()
 }
 
 function clearChat() {
@@ -220,6 +283,8 @@ function clearChat() {
   mermaid.value = ''
   sourceRefs.value = []
   fallbackReason.value = ''
+  provider.value = ''
+  usedFallback.value = false
   profileSuggestion.value = null
   personalization.value = null
   citedResources.value = []

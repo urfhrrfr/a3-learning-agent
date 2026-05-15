@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { api } from './api'
-import type { AgentTrace, AssessmentReport, LearningPath, PlanSummary, Profile, Resource } from './types'
+import type { AgentTrace, AssessmentReport, HealthStatus, LearningPath, PlanSummary, Profile, Resource } from './types'
 
 interface LearningState {
+  health: HealthStatus | null
   profile: Profile | null
   resources: Resource[]
   planSummary: PlanSummary | null
@@ -23,6 +24,7 @@ let refreshPromise: Promise<void> | null = null
 
 export const useLearningStore = defineStore('learning', {
   state: (): LearningState => ({
+    health: null,
     profile: null,
     resources: [],
     planSummary: null,
@@ -59,19 +61,21 @@ export const useLearningStore = defineStore('learning', {
       this.refreshing = true
       try {
         this.error = ''
-        const [profile, resources, path, report] = await Promise.all([
+        const [health, profile, resources, path, report] = await Promise.all([
+          api.health(),
           api.profile(),
           api.resources(),
           api.path(),
           api.assessment()
         ])
+        this.health = health
         this.profile = profile
         this.resources = resources
         this.path = path
         this.report = report
         this.initialized = true
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '初始化学习数据失败')
       } finally {
         this.refreshing = false
       }
@@ -101,7 +105,7 @@ export const useLearningStore = defineStore('learning', {
           this.path = data.learning_path
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '画像更新失败')
       }
     },
     async generateResources(resourceTypes: string[] | Event = [], taskPrompt = '') {
@@ -124,7 +128,7 @@ export const useLearningStore = defineStore('learning', {
         this.path = await api.path()
         this.initialized = true
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '资源生成失败')
       } finally {
         this.loading = false
       }
@@ -136,6 +140,7 @@ export const useLearningStore = defineStore('learning', {
         let syncTimer: ReturnType<typeof setTimeout> | null = null
         let syncInFlight = false
         let syncQueued = false
+        let syncFailures = 0
 
         const cleanup = () => {
           if (source) {
@@ -165,16 +170,21 @@ export const useLearningStore = defineStore('learning', {
             this.traces = latest.traces
             this.resources = latest.resources
             this.planSummary = latest.plan_summary
+            syncFailures = 0
             if (latest.status === 'completed') {
               cleanup()
               resolve()
             }
             if (latest.status === 'failed') {
               cleanup()
-              reject(new Error('资源生成任务失败'))
+              reject(new Error('资源生成任务失败，请调整任务描述后重试。'))
             }
           } catch (e) {
-            // Ignore fetch errors during sync to allow retries
+            syncFailures += 1
+            if (syncFailures >= 6) {
+              cleanup()
+              reject(new Error('生成进度同步中断，可能是后端服务暂时不可用。已停止等待，请检查服务后重试。'))
+            }
           } finally {
             syncInFlight = false
             if (syncQueued) {
@@ -215,7 +225,7 @@ export const useLearningStore = defineStore('learning', {
         this.profile = await api.profile()
         this.path = this.report.adjusted_path
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '评估提交失败')
       } finally {
         this.assessing = false
       }
@@ -232,7 +242,7 @@ export const useLearningStore = defineStore('learning', {
           this.resources.push(quiz)
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '练习题刷新失败')
       } finally {
         this.refreshingQuiz = false
       }
@@ -244,11 +254,33 @@ export const useLearningStore = defineStore('learning', {
         this.resources = this.resources.map(resource => resource.id === resourceId ? result.resource : resource)
         if (result.learning_path) this.path = result.learning_path
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error)
+        this.error = friendlyErrorMessage(error, '资源反馈保存失败')
       }
     }
   }
 })
+
+export function friendlyErrorMessage(error: unknown, fallback = '操作失败') {
+  const raw = error instanceof Error ? error.message : String(error || '')
+  const normalized = raw.toLowerCase()
+  if (
+    normalized.includes('failed to fetch') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('load failed') ||
+    normalized.includes('connection') ||
+    normalized.includes('fetch')
+  ) {
+    return `${fallback}：无法连接后端服务。请确认后端已启动；当前页面仍可查看已有数据或演示兜底内容。`
+  }
+  if (normalized.includes('http 500') || normalized.includes('internal server error')) {
+    return `${fallback}：后端处理异常。请稍后重试，或先使用页面中的兜底/示例内容继续演示。`
+  }
+  if (normalized.includes('http 404')) {
+    return `${fallback}：暂未找到对应数据，可能还没有生成内容。请先完成资源生成后再试。`
+  }
+  if (!raw) return `${fallback}，请稍后重试。`
+  return `${fallback}：${raw}`
+}
 
 function buildGenerationRequest(options: {
   prompt: string

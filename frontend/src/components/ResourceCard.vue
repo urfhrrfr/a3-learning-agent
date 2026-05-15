@@ -1,25 +1,26 @@
 <template>
-  <article class="panel resource-card clean-resource-card">
+  <article class="panel resource-card clean-resource-card" :class="{ compact: props.compact }">
     <div class="resource-card-head">
       <div class="resource-title-block">
         <span class="resource-kind">{{ typeLabel }}</span>
         <h2>{{ resource.title }}</h2>
-        <p class="muted compact">{{ audienceLabel }}</p>
       </div>
-      <span class="status" :class="statusClass">{{ reviewLabel }}</span>
     </div>
 
-    <div class="resource-meta">
-      <span>{{ formatLabel }}</span>
-      <span>{{ resource.difficulty }}</span>
+    <p class="resource-summary-text">{{ summaryText }}</p>
+
+    <div class="task-hint">
+      <span>适合我的原因</span>
+      <strong>{{ audienceLabel }}</strong>
     </div>
 
     <p v-if="resource.review_status === 'needs_revision'" class="soft-note">
-      内容可先查看，系统已标记为待完善。
+      内容可先查看，完整质检说明在详情页。
     </p>
 
     <div class="resource-actions">
-      <button class="btn secondary" type="button" @click="$emit('select', resource)">查看内容</button>
+      <button class="btn secondary" type="button" @click="$emit('select', resource)">开始学习</button>
+      <button class="btn ghost" type="button" @click="$emit('select', resource)">查看详情</button>
       <button
         class="btn ghost"
         type="button"
@@ -55,7 +56,7 @@
 import { computed } from 'vue'
 import type { Resource } from '../types'
 
-const props = defineProps<{ resource: Resource }>()
+const props = defineProps<{ resource: Resource; compact?: boolean }>()
 
 defineEmits<{
   select: [resource: Resource]
@@ -83,22 +84,13 @@ const formatLabels: Record<Resource['content_format'], string> = {
 
 const typeLabel = computed(() => typeLabels[props.resource.type] || props.resource.type)
 const formatLabel = computed(() => formatLabels[props.resource.content_format])
+const summaryText = computed(() => {
+  return `${formatLabel.value}资料，适合用于${props.resource.difficulty || '当前阶段'}学习。`
+})
 
 const audienceLabel = computed(() => {
   const tags = props.resource.target_profile.filter(Boolean).slice(0, 3)
   return tags.length ? tags.join(' / ') : '适合当前学习目标'
-})
-
-const reviewLabel = computed(() => {
-  if (props.resource.review_status === 'passed') return '可学习'
-  if (props.resource.review_status === 'needs_revision') return '待完善'
-  return '不可用'
-})
-
-const statusClass = computed(() => {
-  if (props.resource.review_status === 'passed') return 'passed'
-  if (props.resource.review_status === 'needs_revision') return 'needs_revision'
-  return 'blocked'
 })
 
 const feedbackLabel = computed(() => {

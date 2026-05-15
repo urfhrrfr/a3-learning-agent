@@ -35,7 +35,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options
   })
 
-  const body = await response.json() as ApiResponse<T> | { detail?: string }
+  let body: ApiResponse<T> | { detail?: string }
+  try {
+    body = await response.json() as ApiResponse<T> | { detail?: string }
+  } catch {
+    throw new Error(`HTTP ${response.status}`)
+  }
   if (!response.ok) {
     throw new Error('detail' in body && body.detail ? body.detail : `HTTP ${response.status}`)
   }
