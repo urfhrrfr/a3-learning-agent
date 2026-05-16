@@ -318,10 +318,20 @@ function parseMarkdownTable(content: string, ignoredHeader: string) {
 function sourceLabel(id: string, index: number) {
   const raw = id || `source-${index + 1}`
   const section = raw.includes('#') ? raw.split('#')[1] : raw
-  const readable = section
-    .replace(/:\d+$/, '')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, char => char.toUpperCase())
+  const sectionName = section.replace(/:\d+$/, '')
+  const labels: Record<string, string> = {
+    objectives: '学习目标',
+    concept_cards: '概念卡片',
+    detailed_concepts: '详细知识点',
+    difficulties: '学习难点',
+    misconceptions: '常见误区',
+    real_cases: '真实案例',
+    code_labs: '代码实验',
+    practice_questions: '练习题',
+    reading: '拓展阅读',
+    task: '实践任务'
+  }
+  const readable = labels[sectionName] || '课程知识片段'
   return `来源 ${index + 1}：${readable}`
 }
 
@@ -345,10 +355,12 @@ const friendlyAudit = computed(() => {
 const simpleReviewReason = computed(() => {
   const reason = props.resource?.audit_reason || props.resource?.review_reason || ''
   if (!reason) return '暂无更多说明'
-  return reason.length > 42 ? `${reason.slice(0, 42)}...` : reason
+  const friendly = reason.replace(/^fallback_reason:\s*/i, '系统使用课程知识库兜底生成：')
+  return friendly.length > 42 ? `${friendly.slice(0, 42)}...` : friendly
 })
 
 const personalizationReason = computed(() => {
+  if (props.resource?.personalized_reason) return props.resource.personalized_reason
   const targets = props.resource?.target_profile?.filter(Boolean) || []
   if (targets.length) return targets.slice(0, 3).join('、')
   return '暂无结构化推荐原因'

@@ -107,3 +107,41 @@ npm run build
 ## 答辩表述建议
 
 本项目提交版采用 SQLite 保证零部署可复现，同时提供 Redis 可选缓存层提升任务状态同步能力。多智能体共享统一 LLM Provider，通过不同角色、提示词、输入上下文和执行顺序完成协作。默认 Mock 模式保证演示稳定，接入真实模型时可通过环境变量平滑切换。
+
+## 真实模型 Provider 切换
+
+默认 `LLM_PROVIDER=mock` 用于稳定演示；评委或老师如果要验证真实大模型，请在启动后端前把环境变量切到真实 provider。后端会优先读取 `backend/.env`，也可以直接在当前终端设置环境变量。
+
+讯飞星火 WebSocket 直连模式：
+
+```env
+LLM_PROVIDER=spark
+LLM_TIMEOUT_SECONDS=20
+SPARK_APP_ID=your_spark_app_id
+SPARK_API_KEY=your_spark_api_key
+SPARK_API_SECRET=your_spark_api_secret
+SPARK_MODEL=generalv3.5
+SPARK_API_URL=wss://spark-api.xf-yun.com/v3.5/chat
+```
+
+星火 Ultra / OpenAI-compatible 模式也可以走兼容接口：
+
+```env
+LLM_PROVIDER=openai_compatible
+OPENAI_COMPATIBLE_API_KEY=your_spark_api_password
+OPENAI_COMPATIBLE_BASE_URL=https://spark-api-open.xf-yun.com/v1
+OPENAI_COMPATIBLE_MODEL=4.0Ultra
+```
+
+启动真实模型模式：
+
+```bash
+cd backend
+uvicorn app.main:app --reload
+```
+
+会调用真实模型的核心接口包括：`/api/profile/chat`、`/api/resources/generate/background`、`/api/tutor/chat`、`/api/quiz/submit`。其中资源生成会在多智能体链路中调用 provider，测验提交会在 AssessmentAgent 和后续路径规划中调用 provider。
+
+fallback 不要删除：当 provider 是 `mock`、真实模型 Key 缺失、网络超时、API 返回错误、返回空内容、返回 JSON/结构不符合契约，或多智能体生成链路异常时，系统会切到本地规则/模板兜底，避免核心接口直接 500。
+
+验证当前不是 mock：访问 `GET /api/health`，确认 `llm_provider` 为 `spark` 或 `openai_compatible` 且 `mock_llm=false`；再调用 `/api/tutor/chat` 或 `/api/resources/generate/background`，响应或 job trace 中的 `llm_provider` 应显示真实 provider。若真实模型失败但接口仍 200，并出现 `used_fallback=true`、`fallback_reason` 或 trace warnings，说明真实 provider 路径已被尝试且 fallback 生效。

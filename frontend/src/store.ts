@@ -202,7 +202,7 @@ export const useLearningStore = defineStore('learning', {
           }, 350)
         }
 
-        const eventTypes = ['job_queued', 'job_started', 'agent_completed', 'resource_ready', 'job_completed', 'job_failed']
+        const eventTypes = ['job_queued', 'job_started', 'agent_completed', 'resource_ready', 'job_fallback', 'trace_completed', 'job_completed', 'job_failed', 'completed', 'failed']
         for (const type of eventTypes) {
           source.addEventListener(type, () => {
             scheduleSync()
@@ -280,6 +280,16 @@ export function friendlyErrorMessage(error: unknown, fallback = '操作失败') 
   }
   if (!raw) return `${fallback}，请稍后重试。`
   return `${fallback}：${raw}`
+}
+
+export function isDemoAssessmentReport(report: AssessmentReport | null | undefined) {
+  if (!report) return false
+  const text = [
+    report.feedback,
+    ...(report.strengths || []),
+    report.adjusted_path?.adjustment_reason || ''
+  ].join(' ')
+  return report.mastery_delta === 0 && /暂无正式测评|完成练习提交后|初始化演示测评报告/.test(text)
 }
 
 function buildGenerationRequest(options: {

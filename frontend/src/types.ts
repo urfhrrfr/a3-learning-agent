@@ -115,6 +115,7 @@ export interface Resource {
   source_refs: string[]
   difficulty: string
   target_profile: string[]
+  personalized_reason?: string
   review_status: 'passed' | 'needs_revision' | 'blocked'
   review_reason: string
   audit_reason: string
@@ -159,6 +160,7 @@ export interface GenerationJob {
     payload: Record<string, unknown>
     created_at: string
   }>
+  fallback_reason?: string
   created_at: string
   completed_at: string | null
 }
@@ -259,8 +261,11 @@ export interface TutorExercise {
 export interface TutorExerciseResult {
   score: number
   mastery_delta: number
+  weak_points?: string[]
+  mistake_patterns?: string[]
   feedback: string
   matched_keywords: string[]
+  adjusted_path?: LearningPath
   profile: Profile
   learning_path: LearningPath
   next_step: TutorNextStep | null

@@ -89,6 +89,7 @@ const summaryText = computed(() => {
 })
 
 const audienceLabel = computed(() => {
+  if (props.resource.personalized_reason) return props.resource.personalized_reason
   const tags = props.resource.target_profile.filter(Boolean).slice(0, 3)
   return tags.length ? tags.join(' / ') : '适合当前学习目标'
 })

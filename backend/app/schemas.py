@@ -85,6 +85,7 @@ class Resource(BaseModel):
     source_refs: list[str] = Field(default_factory=list)
     difficulty: str
     target_profile: list[str]
+    personalized_reason: str = ""
     review_status: Literal["passed", "needs_revision", "blocked"]
     review_reason: str = ""
     audit_reason: str = ""
@@ -125,6 +126,7 @@ class GenerationJob(BaseModel):
     traces: list[AgentTrace] = Field(default_factory=list)
     resources: list[Resource] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    fallback_reason: str = ""
     created_at: str
     completed_at: str | None = None
 

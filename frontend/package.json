@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "smoke:demo": "node scripts/demo-smoke.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

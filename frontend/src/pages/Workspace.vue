@@ -57,7 +57,7 @@
           <RouterLink class="suggestion-item" to="/assessment">
             <span>练习评估</span>
             <strong>做几道题，看看哪里还不稳</strong>
-            <small>{{ store.report ? `上次得分 ${store.report.score}` : '完成后会生成反馈' }}</small>
+            <small>{{ hasRealAssessment ? `上次得分 ${store.report?.score}` : '完成后会生成反馈' }}</small>
           </RouterLink>
         </div>
       </section>
@@ -112,12 +112,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useLearningStore } from '../store'
+import { isDemoAssessmentReport, useLearningStore } from '../store'
 import type { Resource } from '../types'
 import ResourceCard from '../components/ResourceCard.vue'
 
 const store = useLearningStore()
 const selected = ref<Resource | null>(null)
+const hasRealAssessment = computed(() => Boolean(store.report && !isDemoAssessmentReport(store.report)))
 
 const loopSteps = computed(() => [
   {
@@ -160,9 +161,9 @@ const loopSteps = computed(() => [
     key: 'assessment',
     index: '05',
     title: '效果评估',
-    description: store.report ? `最近练习得分 ${store.report.score}，路径已反馈调整。` : '练习后形成反馈报告并更新路径。',
+    description: hasRealAssessment.value ? `最近练习得分 ${store.report?.score}，路径已反馈调整。` : '练习后形成反馈报告并更新路径。',
     path: '/assessment',
-    done: Boolean(store.report),
+    done: hasRealAssessment.value,
     label: '做评估'
   }
 ])

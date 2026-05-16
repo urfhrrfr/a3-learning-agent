@@ -297,7 +297,7 @@ def resources_generate_stream(payload: GenerateRequest):
                 "error": job.events[-1]["payload"]["message"] if job.events else "Unknown error",
             }, ensure_ascii=False) + "\n"
     
-    return StreamingResponse(generate(), media_type="application/jsonlines")
+    return StreamingResponse(generate(), media_type="application/jsonlines; charset=utf-8")
 
 
 @router.get("/jobs/{job_id}")
@@ -324,7 +324,7 @@ async def job_events(job_id: str):
                 yield f"event: {item['type']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
                 timeout_count = 0
             if job.status in {"completed", "failed"}:
-                yield f"event: completed\ndata: {json.dumps({'job_id': job_id, 'status': job.status})}\n\n"
+                yield f"event: {job.status}\ndata: {json.dumps({'job_id': job_id, 'status': job.status, 'fallback_reason': job.fallback_reason}, ensure_ascii=False)}\n\n"
                 break
             await asyncio.sleep(0.2)
             timeout_count += 1
@@ -332,7 +332,7 @@ async def job_events(job_id: str):
                 break
 
     headers = {
-        'Content-Type': 'text/event-stream',
+        'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
         'Access-Control-Allow-Origin': '*',
@@ -343,14 +343,14 @@ async def job_events(job_id: str):
 
 @router.get("/resources")
 def list_resources():
-    return ok([resource.model_dump() for resource in state.resources])
+    return ok([state.normalize_resource(resource).model_dump() for resource in state.resources])
 
 
 @router.get("/resources/{resource_id}")
 def get_resource(resource_id: str):
     resource = state.get_resource(resource_id)
     if resource:
-        return ok(resource.model_dump())
+        return ok(state.normalize_resource(resource).model_dump())
     raise HTTPException(status_code=404, detail="resource not found")
 
 
@@ -369,9 +369,8 @@ def learning_path_generate():
 
 @router.get("/learning-path/current")
 def learning_path_current():
-    if state.learning_path is None:
-        state.generate_learning_path("初始化演示学习路径")
-    return ok(state.learning_path.model_dump())
+    path = state.get_or_create_learning_path("初始化或修复演示学习路径")
+    return ok(path.model_dump())
 
 
 @router.post("/learning-path/feedback")
@@ -437,16 +436,15 @@ def learning_path_prioritize():
 
 @router.get("/learning-path/progress")
 def learning_path_progress():
-    if state.learning_path is None:
-        state.generate_learning_path("初始化演示学习路径")
+    path = state.get_or_create_learning_path("初始化或修复演示学习路径")
     
-    progress = LearningProgress(state.learning_path.id)
+    progress = LearningProgress(path.id)
     progress.completed_steps = ["step_01"]
     progress.total_time_spent_minutes = 45
     progress.record_quiz_score("quiz_01", 0.75, 10)
     
     planner = PathPlanner()
-    summary = planner.generate_progress_summary(state.learning_path.model_dump(), progress)
+    summary = planner.generate_progress_summary(path.model_dump(), progress)
     return ok(summary)
 
 
@@ -577,9 +575,7 @@ def quiz_refresh():
 
 @router.get("/assessment/report")
 def assessment_report():
-    if state.assessment_report is None:
-        return ok(None)
-    return ok(state.assessment_report.model_dump())
+    return ok(state.get_or_create_assessment_report().model_dump())
 
 
 @router.get("/course/chunks")

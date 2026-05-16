@@ -110,7 +110,7 @@ import { api } from '../api'
 import ChatPanel from '../components/ChatPanel.vue'
 import ProfileRadar from '../components/ProfileRadar.vue'
 import WeakPointCloud from '../components/WeakPointCloud.vue'
-import { friendlyErrorMessage, useLearningStore } from '../store'
+import { friendlyErrorMessage, isDemoAssessmentReport, useLearningStore } from '../store'
 import type { ProfileChangeLog } from '../types'
 
 const store = useLearningStore()
@@ -118,6 +118,7 @@ const changeLogs = ref<ProfileChangeLog[]>([])
 const metaLoading = ref(false)
 const metaError = ref('')
 const loading = ref(false)
+const realReport = computed(() => isDemoAssessmentReport(store.report) ? null : store.report)
 
 const fieldLabels: Record<string, string> = {
   major: '专业',
@@ -155,11 +156,11 @@ const courseChapter = computed(() => {
 const weakPointCount = computed(() => {
   const points = new Set<string>()
   for (const point of store.profile?.weak_points || []) points.add(point)
-  for (const point of store.report?.weak_points || []) points.add(point)
+  for (const point of realReport.value?.weak_points || []) points.add(point)
   return points.size
 })
 const weakPointText = computed(() => {
-  const points = [...new Set([...(store.profile?.weak_points || []), ...(store.report?.weak_points || [])])]
+  const points = [...new Set([...(store.profile?.weak_points || []), ...(realReport.value?.weak_points || [])])]
   return points.length ? points.slice(0, 3).join('、') : '暂未识别'
 })
 const preferenceText = computed(() => {
@@ -168,12 +169,12 @@ const preferenceText = computed(() => {
   return store.profile?.cognitive_style || '未记录'
 })
 const primaryAdvice = computed(() => {
-  if (store.report?.weak_points?.length) return '先补薄弱点'
+  if (realReport.value?.weak_points?.length) return '先补薄弱点'
   if (store.profile?.learning_goal) return '按目标学习'
   return '先补充画像'
 })
 const adviceDetail = computed(() => {
-  if (store.report?.weak_points?.length) return `优先复习 ${store.report.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
+  if (realReport.value?.weak_points?.length) return `优先复习 ${realReport.value.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
   if (store.profile?.weak_points?.length) return `先从 ${store.profile.weak_points.slice(0, 2).join('、')} 开始巩固。`
   if (store.profile?.learning_goal) return '先生成一组学习资料，再按路径完成练习。'
   return '填写学习目标和当前困惑后，系统会给出更具体建议。'

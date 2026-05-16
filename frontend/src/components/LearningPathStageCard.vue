@@ -29,9 +29,9 @@
           class="stage-resource-item"
           :class="{ missing: !item.resource }"
         >
-          <span>{{ item.resource ? typeLabel(item.resource.type) : '资源未加载' }}</span>
-          <strong>{{ item.resource?.title || item.id }}</strong>
-          <small>{{ item.resource ? item.resource.difficulty : '当前资源列表中未找到该 ID' }}</small>
+          <span>{{ item.resource ? typeLabel(item.resource.type) : '资源待同步' }}</span>
+          <strong>{{ item.resource?.title || '推荐资源暂未同步到材料库' }}</strong>
+          <small>{{ item.resource ? item.resource.difficulty : '请先同步材料库或重新生成资源' }}</small>
         </article>
       </div>
       <p v-else class="muted compact">该阶段暂无绑定资源。</p>

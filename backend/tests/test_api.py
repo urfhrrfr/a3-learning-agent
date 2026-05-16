@@ -676,6 +676,64 @@ def test_learning_path_api_exposes_specific_reasons_and_resource_ids(monkeypatch
         state.assessment_report = original_assessment
 
 
+def test_current_learning_path_repairs_stale_resource_references():
+    original_profile = state.profile
+    original_resources = state.resources
+    original_path = state.learning_path
+    original_assessment = state.assessment_report
+    try:
+        state.profile = state.Profile(updated_at=state.now())
+        state.resources = [
+            Resource(
+                id="res_current",
+                type="lecture_doc",
+                title="Current resource",
+                content_format="markdown",
+                content="Demo content",
+                source_refs=["demo#objectives"],
+                difficulty="入门",
+                target_profile=["demo"],
+                review_status="passed",
+                created_by_agents=["TestAgent"],
+                created_at=state.now(),
+            )
+        ]
+        state.learning_path = state.LearningPath(
+            id="path_stale",
+            profile_version=1,
+            mastery=0.2,
+            adjustment_reason="stale path",
+            updated_at=state.now(),
+            steps=[
+                state.LearningPathStep(
+                    id="step_01",
+                    title="Stale",
+                    objective="References an old resource",
+                    recommended_resource_ids=["res_missing"],
+                    reason="stale",
+                    estimated_minutes=10,
+                )
+            ],
+        )
+        state.assessment_report = None
+
+        repaired = payload(client.get("/api/learning-path/current"))
+        valid_ids = {resource.id for resource in state.resources}
+        referenced_ids = [
+            resource_id
+            for step in repaired["steps"]
+            for resource_id in step["recommended_resource_ids"]
+        ]
+
+        assert referenced_ids
+        assert all(resource_id in valid_ids for resource_id in referenced_ids)
+    finally:
+        state.profile = original_profile
+        state.resources = original_resources
+        state.learning_path = original_path
+        state.assessment_report = original_assessment
+
+
 def test_api_contract_endpoints_return_documented_shapes():
     health = payload(client.get("/api/health"))
     assert_fields(health, {"status", "mock_llm", "course"})

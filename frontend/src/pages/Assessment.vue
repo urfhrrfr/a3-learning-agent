@@ -7,8 +7,8 @@
         <p>先看得分、主要薄弱点和下一步补救任务，详细分析放在下方。</p>
       </div>
       <div class="today-focus-card">
-        <span>本次得分</span>
-        <strong>{{ store.report ? `${store.report.score} 分` : '待提交' }}</strong>
+        <span>{{ isDemoReport ? '练习状态' : '本次得分' }}</span>
+        <strong>{{ store.report && !isDemoReport ? `${store.report.score} 分` : '待提交' }}</strong>
         <p>{{ store.report ? scoreConclusion : '完成练习后生成报告' }}</p>
       </div>
     </section>
@@ -16,7 +16,7 @@
     <section class="student-summary-grid">
       <article class="metric-tile">
         <span>本次得分</span>
-        <strong>{{ store.report ? store.report.score : '-' }}</strong>
+        <strong>{{ store.report && !isDemoReport ? store.report.score : '-' }}</strong>
         <small>{{ store.report ? scoreConclusion : '提交练习后生成' }}</small>
       </article>
       <article class="metric-tile">
@@ -61,9 +61,12 @@
             <h2>评估结论</h2>
             <p class="muted compact">先看哪里需要补，再按推荐任务继续学。</p>
           </div>
-          <span v-if="store.report" class="status completed">已生成</span>
+        <span v-if="store.report" class="status completed">{{ isDemoReport ? '演示占位' : '已生成' }}</span>
         </div>
         <template v-if="store.report">
+          <p v-if="isDemoReport" class="soft-note">
+            当前是默认演示报告，还没有根据你的真实作答评分。提交左侧练习后会生成真实得分、薄弱点和路径调整。
+          </p>
           <p class="assessment-feedback-text">{{ store.report.feedback }}</p>
           <div class="report-section">
             <b>薄弱点</b>
@@ -110,9 +113,10 @@
 import { computed, onMounted } from 'vue'
 import QuizPlayer from '../components/QuizPlayer.vue'
 import type { QuizQuestion } from '../components/QuizPlayer.vue'
-import { useLearningStore } from '../store'
+import { isDemoAssessmentReport, useLearningStore } from '../store'
 
 const store = useLearningStore()
+const isDemoReport = computed(() => isDemoAssessmentReport(store.report))
 const quizQuestions = computed<QuizQuestion[]>(() => {
   const quizResource = store.resources.find(resource => resource.type === 'quiz')
   if (!quizResource) return []
@@ -131,11 +135,12 @@ const profileUpdateHint = computed(() => {
 })
 const scoreConclusion = computed(() => {
   if (!store.report) return ''
+  if (isDemoReport.value) return '还没有完成真实练习评估'
   if (store.report.score >= 85) return '整体掌握较好，继续做迁移练习'
   if (store.report.score >= 60) return '基础可继续巩固，优先补薄弱点'
   return '建议先回到讲解材料，再做基础练习'
 })
-const mainWeakPoint = computed(() => store.report?.weak_points[0] || '暂无')
+const mainWeakPoint = computed(() => isDemoReport.value ? '待评估' : store.report?.weak_points[0] || '暂无')
 const nextRepairTask = computed(() => store.path?.steps[0]?.title || '先完成一组练习')
 const recommendedTask = computed(() => store.path?.steps[0]?.objective || '等待路径推荐')
 const nextRepairDetail = computed(() => {
@@ -143,12 +148,14 @@ const nextRepairDetail = computed(() => {
   return profileUpdateHint.value
 })
 const errorReasonText = computed(() => {
+  if (isDemoReport.value) return '完成练习后会显示'
   if (store.report?.mistake_patterns?.length) return store.report.mistake_patterns.slice(0, 2).join('、')
   if (store.report?.weak_points?.length) return `主要需要加强：${store.report.weak_points.slice(0, 2).join('、')}`
   return '完成练习后会显示'
 })
 const masteryDeltaText = computed(() => {
   if (!store.report) return '完成练习后会显示'
+  if (isDemoReport.value) return '待评估'
   const percent = Math.round(store.report.mastery_delta * 100)
   return `${percent >= 0 ? '+' : ''}${percent}%`
 })
