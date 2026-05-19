@@ -201,6 +201,79 @@ def get_job(job_id: str) -> GenerationJob | None:
     return None
 
 
+def _record_time_key(item: dict) -> str:
+    return str(item.get("completed_at") or item.get("updated_at") or item.get("created_at") or "")
+
+
+def latest_generation_job_id() -> str:
+    if active_generation_job_id:
+        return active_generation_job_id
+    completed_jobs = [
+        job
+        for job in jobs.values()
+        if job.status == "completed" and job.resources
+    ]
+    if not completed_jobs:
+        return ""
+    latest = max(completed_jobs, key=lambda item: item.completed_at or item.created_at)
+    return latest.id
+
+
+def generation_history(limit: int = 20) -> list[dict]:
+    loaded = []
+    for item in load_records("job"):
+        try:
+            job = GenerationJob(**item)
+            loaded.append(job)
+            jobs.setdefault(job.id, job)
+        except Exception:  # noqa: BLE001
+            continue
+    current_id = latest_generation_job_id()
+    candidates = [
+        job
+        for job in {job.id: job for job in [*loaded, *jobs.values()]}.values()
+        if job.resources or job.status in {"queued", "running", "failed"}
+    ]
+    candidates = sorted(candidates, key=lambda item: item.completed_at or item.created_at, reverse=True)
+    return [
+        {
+            **job.model_dump(),
+            "is_current": job.id == current_id,
+        }
+        for job in candidates[: max(1, min(limit, 100))]
+    ]
+
+
+def learning_path_history(limit: int = 20) -> list[dict]:
+    records = load_records("path")
+    if learning_path and not any(item.get("id") == learning_path.id for item in records):
+        records.append(learning_path.model_dump())
+    records = sorted(records, key=_record_time_key, reverse=True)
+    current_id = learning_path.id if learning_path else ""
+    return [
+        {
+            **item,
+            "is_current": item.get("id") == current_id,
+        }
+        for item in records[: max(1, min(limit, 100))]
+    ]
+
+
+def assessment_history(limit: int = 20) -> list[dict]:
+    records = load_records("assessment")
+    if assessment_report and not any(item.get("id") == assessment_report.id for item in records):
+        records.append(assessment_report.model_dump())
+    records = sorted(records, key=_record_time_key, reverse=True)
+    current_id = assessment_report.id if assessment_report else ""
+    return [
+        {
+            **item,
+            "is_current": item.get("id") == current_id,
+        }
+        for item in records[: max(1, min(limit, 100))]
+    ]
+
+
 def build_plan_summary(plan_details: list[dict]) -> PlanSummary:
     decisions = [
         PlanDecision(

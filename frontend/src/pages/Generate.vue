@@ -73,7 +73,7 @@
         <section class="panel result-panel studio-result-panel">
           <div class="panel-title">
             <div>
-              <h2>生成结果</h2>
+              <h2>本轮生成结果</h2>
               <p class="muted compact">{{ resultSubtitle }}</p>
             </div>
             <div class="result-actions">
@@ -105,7 +105,7 @@
               v-for="resource in store.resources"
               :key="resource.id"
               :resource="resource"
-              @select="selected = $event"
+              @select="selectCurrentResource"
               @feedback="handleFeedback"
             />
           </div>
@@ -127,7 +127,63 @@
           </div>
         </section>
 
-        <ResourceContent v-if="selected" :resource="selected" />
+        <section class="panel history-panel">
+          <div class="panel-title">
+            <div>
+              <h2>历史资料包</h2>
+              <p class="muted compact">以前生成过的学习资料会保存在这里，点击后可以继续打开学习。</p>
+            </div>
+            <button v-if="selectedHistoryJob" class="btn ghost" type="button" @click="returnToCurrentResources">查看本轮资料</button>
+            <span v-else class="status pending">{{ historicalGenerations.length }} 个资料包</span>
+          </div>
+          <div v-if="selectedHistoryJob" class="history-package-view">
+            <div class="history-package-summary">
+              <div>
+                <span class="eyebrow">正在查看历史资料包</span>
+                <h3>{{ historyTitle(selectedHistoryJob) }}</h3>
+                <p class="muted compact">{{ formatDate(selectedHistoryJob.completed_at || selectedHistoryJob.created_at) }} 生成，共 {{ selectedHistoryJob.resources.length }} 份学习资料。</p>
+              </div>
+              <div class="history-type-summary">
+                <span v-for="item in resourceTypeSummary(selectedHistoryJob.resources)" :key="item.type">{{ typeLabel(item.type) }} {{ item.count }}</span>
+              </div>
+            </div>
+            <div class="cards result-cards">
+              <ResourceCard
+                v-for="resource in selectedHistoryJob.resources"
+                :key="resource.id"
+                :resource="resource"
+                readonly
+                @select="selectHistoryResource"
+              />
+            </div>
+          </div>
+          <div v-else-if="historicalGenerations.length" class="history-package-grid">
+            <button
+              v-for="job in historicalGenerations.slice(0, 6)"
+              :key="job.id"
+              class="history-package-card"
+              type="button"
+              @click="openHistoryJob(job)"
+            >
+              <div class="history-record-head">
+                <div>
+                  <strong>{{ historyTitle(job) }}</strong>
+                  <small>{{ formatDate(job.completed_at || job.created_at) }} · {{ job.resources.length }} 份学习资料</small>
+                </div>
+                <span class="status" :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span>
+              </div>
+              <div class="history-type-summary">
+                <span v-for="item in resourceTypeSummary(job.resources).slice(0, 4)" :key="item.type">{{ typeLabel(item.type) }} {{ item.count }}</span>
+              </div>
+            </button>
+          </div>
+          <div v-else class="empty small-empty">
+            <strong>暂无历史资料包</strong>
+            <span>生成新的资料后，以前的资料包会保存在这里，之后可以随时点开继续学习。</span>
+          </div>
+        </section>
+
+        <ResourceContent v-if="activePreviewResource" :resource="activePreviewResource" />
       </main>
 
       <details class="system-details">
@@ -158,7 +214,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLearningStore } from '../store'
-import type { Resource } from '../types'
+import type { GenerationHistoryItem, Resource } from '../types'
 import GenerationProgress from '../components/GenerationProgress.vue'
 import ResourceCard from '../components/ResourceCard.vue'
 import ResourceContent from '../components/ResourceContent.vue'
@@ -170,6 +226,8 @@ interface PromptTemplate {
 
 const store = useLearningStore()
 const selected = ref<Resource | null>(null)
+const selectedHistoryJob = ref<GenerationHistoryItem | null>(null)
+const selectedHistoryResource = ref<Resource | null>(null)
 const draftPrompt = ref('')
 const toast = ref('')
 const outputMode = ref('all')
@@ -206,6 +264,8 @@ const profileHint = computed(() => {
   if (!store.profile) return '暂无画像，后端会使用默认学习画像。'
   return `${store.profile.course} / ${store.profile.current_chapter} / 目标：${store.profile.learning_goal}`
 })
+const historicalGenerations = computed(() => store.resourceHistory.filter(job => !job.is_current))
+const activePreviewResource = computed(() => selectedHistoryResource.value || selected.value)
 
 onMounted(async () => {
   await store.ensureReady()
@@ -231,6 +291,7 @@ function resetDraft() {
 
 async function submitGeneration() {
   if (!canSubmit.value) return
+  returnToCurrentResources()
   await store.generateResources(selectedResourceTypes(), draftPrompt.value)
   selected.value = store.resources[0] || null
   showToast(store.resources.length ? '资源生成完成' : '任务完成，但暂无结果')
@@ -246,7 +307,74 @@ function selectedResourceTypes() {
   return []
 }
 
+function formatDate(value?: string | null) {
+  if (!value) return '时间未知'
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function typeLabel(type: string) {
+  const labels: Record<string, string> = {
+    lecture_doc: '图文讲解',
+    mind_map: '思维导图',
+    quiz: '互动练习',
+    reading: '拓展阅读',
+    media_script: '视频脚本',
+    animation_demo: '动画演示',
+    ppt_draft: 'PPT 草稿',
+    visual_card: '学习卡片',
+    code_case: '代码实验'
+  }
+  return labels[type] || type
+}
+
+function historyTitle(job: GenerationHistoryItem) {
+  return job.request.goal || job.request.chapter || '历史学习资料包'
+}
+
+function resourceTypeSummary(resources: Resource[]) {
+  const counts = new Map<string, number>()
+  for (const resource of resources) counts.set(resource.type, (counts.get(resource.type) || 0) + 1)
+  return [...counts.entries()].map(([type, count]) => ({ type, count }))
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    completed: '已完成',
+    running: '生成中',
+    queued: '等待生成',
+    failed: '生成失败'
+  }
+  return labels[status] || '已保存'
+}
+
+function statusClass(status: string) {
+  if (status === 'failed') return 'failed'
+  if (status === 'running' || status === 'queued') return 'pending'
+  return 'completed'
+}
+
+function openHistoryJob(job: GenerationHistoryItem) {
+  selectedHistoryJob.value = job
+  selectedHistoryResource.value = job.resources[0] || null
+  showToast('已打开历史资料包')
+}
+
+function selectHistoryResource(resource: Resource) {
+  selectedHistoryResource.value = resource
+}
+
+function returnToCurrentResources() {
+  selectedHistoryJob.value = null
+  selectedHistoryResource.value = null
+}
+
+function selectCurrentResource(resource: Resource) {
+  returnToCurrentResources()
+  selected.value = resource
+}
+
 async function handleFeedback(resource: Resource, action: Resource['user_feedback']) {
+  returnToCurrentResources()
   await store.submitResourceFeedback(resource.id, action)
   selected.value = store.resources.find(item => item.id === resource.id) || selected.value
   showToast('反馈已保存')

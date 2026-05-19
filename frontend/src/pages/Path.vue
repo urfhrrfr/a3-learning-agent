@@ -52,7 +52,7 @@
       <section class="panel span-12 path-stage-panel">
         <div class="panel-title">
           <div>
-            <h2>任务清单</h2>
+            <h2>本轮任务清单</h2>
             <p class="muted compact">每一步都包含预计时间和推荐原因。</p>
           </div>
           <button class="btn secondary" :disabled="store.refreshing" @click="store.refresh">
@@ -99,6 +99,33 @@
           </div>
         </section>
       </details>
+
+      <section class="panel span-12 history-panel">
+        <div class="panel-title">
+          <div>
+            <h2>历史学习任务</h2>
+            <p class="muted compact">本轮任务清单在上方，历史路径按生成时间归档。</p>
+          </div>
+          <span class="status pending">{{ historicalPaths.length }} 条历史</span>
+        </div>
+        <div v-if="historicalPaths.length" class="history-record-list">
+          <article v-for="path in historicalPaths" :key="path.id" class="history-record">
+            <div class="history-record-head">
+              <div>
+                <strong>{{ path.steps[0]?.title || '历史学习路径' }}</strong>
+                <small>{{ formatDate(path.updated_at) }} · {{ path.steps.length }} 个任务 · 掌握度 {{ Math.round(path.mastery * 100) }}%</small>
+              </div>
+            </div>
+            <div class="history-chip-row">
+              <span v-for="step in path.steps.slice(0, 4)" :key="step.id">{{ step.title }}</span>
+            </div>
+          </article>
+        </div>
+        <div v-else class="empty small-empty">
+          <strong>暂无历史任务</strong>
+          <span>后续生成新任务后，旧任务会留在这里，便于区分本轮和历史。</span>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -119,5 +146,11 @@ const totalMinutes = computed(() => store.path?.steps.reduce((sum, step) => sum 
 const firstStepLabel = computed(() => store.path?.steps[0]?.title || '先生成学习资料')
 const secondStepLabel = computed(() => store.path?.steps[1]?.title || '按推荐资源学习')
 const thirdStepLabel = computed(() => store.path?.steps[2]?.title || '完成练习并复盘')
+const historicalPaths = computed(() => store.pathHistory.filter(path => !path.is_current))
+
+function formatDate(value?: string | null) {
+  if (!value) return '时间未知'
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
 </script>

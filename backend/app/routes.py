@@ -7,12 +7,14 @@ from fastapi.responses import StreamingResponse
 
 from . import state
 from .cache import status as cache_status
-from .knowledge import COURSE, question_bank
-from .storage import status as storage_status
+from .knowledge import COURSE, find_chapter, question_bank
+from .storage import load_records, status as storage_status
 from .providers.base import LLMProviderError
 from .providers.factory import get_llm_provider
+from .retrieval import HybridRetriever, save_retrieval_log
 from .schemas import ChatAndGenerateRequest, GenerateRequest, ProfileChatRequest, QuizSubmitRequest, ResourceAdjustRequest, ResourceFeedbackRequest, TutorExerciseSubmitRequest, TutorRequest, WeakPointConfirmRequest
 from .path_planner import PathPlanner, LearningProgress
+from .vector_store import vector_store_status
 
 router = APIRouter(prefix="/api")
 
@@ -151,6 +153,45 @@ def _build_next_step(active_profile, topic: str) -> dict:
     }
 
 
+def _tutor_profile_context(active_profile, preferred_mode: str) -> str:
+    return "\n".join(
+        [
+            f"学习目标：{active_profile.learning_goal}",
+            f"薄弱点：{'、'.join(active_profile.weak_points)}",
+            f"易错模式：{'、'.join(active_profile.mistake_patterns)}",
+            f"已有基础：{'、'.join(active_profile.knowledge_base)}",
+            f"偏好：{preferred_mode}；{'、'.join(active_profile.preferred_modalities)}",
+            f"掌握度：{active_profile.mastery:.2f}",
+        ]
+    )
+
+
+def _tutor_preferred_sections(preferred_mode: str) -> set[str]:
+    sections = {"detailed_concepts", "misconceptions", "difficulties", "practice_questions"}
+    if preferred_mode in {"代码", "代码案例"}:
+        sections.add("code_labs")
+    if preferred_mode in {"图解", "例子"}:
+        sections.update({"concept_cards", "real_cases"})
+    if preferred_mode in {"短视频脚本", "短视频"}:
+        sections.add("real_cases")
+    return sections
+
+
+def _format_rag_sources(sources: list[dict]) -> str:
+    if not sources:
+        return "暂无课程知识库证据。"
+    lines = []
+    for source in sources[:5]:
+        text = " ".join(str(source.get("text", "")).split())
+        if len(text) > 260:
+            text = text[:257] + "..."
+        lines.append(
+            f"- [{source.get('id')}] score={float(source.get('relevance_score', 0)):.2f} "
+            f"{source.get('chapter_title', '')}/{source.get('section_label') or source.get('section', '')}：{text}"
+        )
+    return "\n".join(lines)
+
+
 def request_user_id(x_user_id: str | None = Header(default=None, alias="X-User-Id")) -> str:
     return state.normalize_user_id(x_user_id)
 
@@ -165,6 +206,7 @@ def health():
             "llm_provider": provider.name,
             "cache": cache_status(),
             "storage": storage_status(),
+            "vector_store": vector_store_status(collection_name=str(COURSE.get("id", "course"))),
             "course": COURSE["title"],
         }
     )
@@ -346,6 +388,11 @@ def list_resources():
     return ok([state.normalize_resource(resource).model_dump() for resource in state.resources])
 
 
+@router.get("/resources/history")
+def resources_history(limit: int = 20):
+    return ok(state.generation_history(limit))
+
+
 @router.get("/resources/{resource_id}")
 def get_resource(resource_id: str):
     resource = state.get_resource(resource_id)
@@ -371,6 +418,11 @@ def learning_path_generate():
 def learning_path_current():
     path = state.get_or_create_learning_path("初始化或修复演示学习路径")
     return ok(path.model_dump())
+
+
+@router.get("/learning-path/history")
+def learning_path_history(limit: int = 20):
+    return ok(state.learning_path_history(limit))
 
 
 @router.post("/learning-path/feedback")
@@ -472,6 +524,30 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
     profile_suggestion = _detect_tutor_weak_point(payload.question, active_profile)
     preferred_mode = _preferred_tutor_mode(active_profile)
     tutor_topic = _infer_tutor_topic(payload.question, profile_suggestion, active_profile)
+    current_chapter = find_chapter(active_profile.current_chapter or tutor_topic or "机器学习基础")
+    provider = get_llm_provider()
+    rag_profile_context = _tutor_profile_context(active_profile, preferred_mode)
+    rag_sources, rag_warnings = HybridRetriever(COURSE, llm=provider, max_candidates=12, top_k=5).retrieve(
+        query=f"{payload.question}；当前主题：{tutor_topic}",
+        profile_context=rag_profile_context,
+        current_chapter_id=current_chapter["id"],
+        preferred_sections=_tutor_preferred_sections(preferred_mode),
+    )
+    save_retrieval_log(
+        scenario="tutor_chat",
+        user_id=user_id,
+        query=payload.question,
+        profile_snapshot=active_profile.model_dump(),
+        selected_sources=rag_sources,
+        request_context={
+            "topic": tutor_topic,
+            "preferred_mode": preferred_mode,
+            "current_chapter_id": current_chapter["id"],
+            "resource_id": payload.resource_id,
+        },
+        warnings=rag_warnings,
+    )
+    rag_context = _format_rag_sources(rag_sources)
     selected_resource = state.get_resource(payload.resource_id) if payload.resource_id else None
     context_resources = [selected_resource] if selected_resource else state.resources[:3]
     cited_resources = [
@@ -494,7 +570,9 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
         for resource in context_resources
         if resource
     )
-    source_refs = sorted({ref for resource in context_resources if resource for ref in resource.source_refs}) or ["ai_intro/ch04#concepts"]
+    resource_refs = {ref for resource in context_resources if resource for ref in resource.source_refs}
+    rag_refs = {str(source.get("id")) for source in rag_sources if source.get("id")}
+    source_refs = sorted(rag_refs | resource_refs) or ["ai_intro/ch04#concepts"]
     history_items = []
     for item in payload.history[-8:]:
         role = item.get("role", "")
@@ -507,7 +585,12 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
         f"我会按你当前偏好的“{preferred_mode}”方式来讲。"
         "可以先把问题拆成“直觉、步骤、检查点”三层：先看它想解决什么，再看每一步怎么算，最后用一个小例子判断自己是否真的会用。"
     )
-    provider = get_llm_provider()
+    if rag_sources:
+        fallback_answer = (
+            f"我会按你当前偏好的“{preferred_mode}”方式来讲。"
+            f"课程知识库里最相关的是 [{rag_sources[0]['id']}]：{str(rag_sources[0].get('text', ''))[:180]}。"
+            "你可以先抓住它对应的概念边界，再用一个小例子检查自己是否会迁移。"
+        )
     answer = fallback_answer
     fallback_reason = ""
     if provider.name != "mock":
@@ -516,7 +599,7 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
                 "你是一个高校课程智能辅导大模型，不是固定 FAQ。请根据学生问题动态回答。\n"
                 "回答要求：\n"
                 "1. 使用中文，语气像耐心助教，先直接回应问题，再分步骤解释。\n"
-                "2. 必须结合学生画像和已生成课程资源，不要脱离上下文泛泛而谈。\n"
+                "2. 必须结合学生画像、课程知识库 RAG 证据和已生成课程资源，不要脱离上下文泛泛而谈。\n"
                 "3. 如果学生问题很短，也要先判断其可能困惑点，再给一个例子和一个追问。\n"
                 "4. 不要每次套用同一段话；同一主题也要根据问题措辞调整解释角度。\n"
                 "5. 参考最近对话，保持连续性；不要把已解释过的内容原样重复一遍。\n"
@@ -526,7 +609,8 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
                 f"学生画像：{active_profile.model_dump()}\n\n"
                 f"本次推荐讲解方式：{preferred_mode}\n"
                 f"画像更新建议：{profile_suggestion or '无'}\n\n"
-                f"当前课程资源上下文：\n{resource_context or '暂无已生成资源，请基于课程画像和问题回答。'}\n\n"
+                f"课程知识库 RAG 证据：\n{rag_context}\n\n"
+                f"当前已生成资源上下文：\n{resource_context or '暂无已生成资源，请优先基于 RAG 证据、学生画像和问题回答。'}\n\n"
                 f"最近对话历史：\n{history_context}\n\n"
                 f"学生问题：{payload.question}\n"
             ).strip() or fallback_answer
@@ -543,6 +627,7 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
             "llm_provider": provider.name,
             "used_fallback": answer == fallback_answer,
             "fallback_reason": fallback_reason,
+            "retrieval_warnings": rag_warnings,
             "profile_suggestion": profile_suggestion,
             "profile_snapshot": active_profile.model_dump(),
             "personalization": {
@@ -551,6 +636,7 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
                 "weak_points": active_profile.weak_points,
             },
             "cited_resources": cited_resources,
+            "evidence_sources": rag_sources,
             "next_step": _build_next_step(active_profile, tutor_topic),
             "exercise": _build_tutor_exercise(tutor_topic, preferred_mode, selected_resource.id if selected_resource else None),
         }
@@ -578,6 +664,17 @@ def assessment_report():
     return ok(state.get_or_create_assessment_report().model_dump())
 
 
+@router.get("/assessment/history")
+def assessment_history(limit: int = 20):
+    return ok(state.assessment_history(limit))
+
+
 @router.get("/course/chunks")
 def course_chunks():
     return ok({"course": COURSE, "question_count": len(question_bank()), "questions": question_bank()})
+
+
+@router.get("/retrieval/logs")
+def retrieval_logs(limit: int = 20):
+    logs = sorted(load_records("retrieval_log"), key=lambda item: item.get("created_at", ""), reverse=True)
+    return ok(logs[: max(1, min(limit, 100))])

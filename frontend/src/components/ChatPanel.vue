@@ -4,7 +4,7 @@
     <div class="timeline">
       <div v-for="item in messages" :key="item" class="timeline-item">{{ item }}</div>
     </div>
-    <textarea v-model="message" rows="4" placeholder="例如：我线性代数比较薄弱，希望多给代码案例和动画解释"></textarea>
+    <textarea v-model="message" rows="4" placeholder="例如：我看公式容易走神，更希望先用图解和生活类比理解概念。"></textarea>
     <div class="split">
       <button class="btn" :disabled="!message.trim() || sending || loading" @click="send">发送并更新画像</button>
       <span class="muted" v-if="sending || loading">正在抽取画像...</span>
@@ -17,7 +17,7 @@ import { ref } from 'vue'
 
 const props = defineProps<{ loading?: boolean }>()
 const emit = defineEmits<{ send: [message: string] }>()
-const message = ref('我线性代数比较薄弱，希望多给 Python 代码案例和动画解释')
+const message = ref('')
 const sending = ref(false)
 const messages = ref(['系统：告诉我你的基础、目标、困惑和偏好的学习方式。'])
 

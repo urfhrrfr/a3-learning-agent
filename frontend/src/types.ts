@@ -165,6 +165,10 @@ export interface GenerationJob {
   completed_at: string | null
 }
 
+export interface GenerationHistoryItem extends GenerationJob {
+  is_current?: boolean
+}
+
 export interface GenerationEvent {
   type: string
   payload: Record<string, unknown>
@@ -188,6 +192,10 @@ export interface LearningPath {
   adjustment_reason: string
   steps: LearningPathStep[]
   updated_at: string
+}
+
+export interface LearningPathHistoryItem extends LearningPath {
+  is_current?: boolean
 }
 
 export interface ProfileChatResponse {
@@ -281,4 +289,8 @@ export interface AssessmentReport {
   feedback: string
   adjusted_path: LearningPath
   created_at: string
+}
+
+export interface AssessmentHistoryItem extends AssessmentReport {
+  is_current?: boolean
 }

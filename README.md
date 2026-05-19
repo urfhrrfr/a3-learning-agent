@@ -7,25 +7,40 @@
 - 多智能体协作：ProfileAgent、KnowledgeAgent、PlannerAgent、资源生成 Agent、ReviewAgent、AssessmentAgent 等按依赖关系协同执行。
 - 个性化学习闭环：从画像诊断到资源生成、路径推荐、智能辅导、练习评估和路径调整。
 - LLM Provider 抽象：默认使用 Mock 稳定演示，也可切换到星火、DeepSeek、Qwen、OpenAI 兼容接口。
-- SQLite 持久化：保存画像、任务、资源、学习路径、评估报告和 Agent Trace，便于本地复现。
-- Redis 可选增强：用于任务进度和 Agent Trace 快照缓存；未配置时自动降级，不影响演示。
+- RAG 课程知识库：资源生成和智能辅导会结合课程片段检索、画像偏好和证据引用，减少泛泛回答。
+- MySQL 持久化：保存画像、任务、资源、学习路径、评估报告、检索日志和历史版本；SQLite 可作为本地 fallback 与迁移来源。
+- Redis 缓存增强：用于任务进度和 Agent Trace 快照缓存；未配置时自动降级，不影响核心接口。
 - 学生使用型前端：主界面聚焦今日任务、学习资料、智能导师和练习反馈，技术细节沉淀到文档与源码。
 
 ## 技术栈
 
-- 后端：FastAPI、Pydantic、SQLite、可选 Redis
+- 后端：FastAPI、Pydantic、MySQL/SQLite、Redis、可选 Chroma
 - 前端：Vue 3、Vite、Pinia、TypeScript
 - 模型接入：MockLLMProvider、SparkLLMProvider、OpenAICompatibleProvider
 
 ## 本地启动
 
-后端：
+后端依赖：
 
 ```bash
 cd backend
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+本地 MySQL + Redis：
+
+```powershell
+cd backend
+docker compose -f docker-compose.storage.yml up -d
+.\.venv\Scripts\python.exe scripts\check_mysql_redis.py
+```
+
+启动后端：
+
+```bash
+cd backend
 uvicorn app.main:app --reload
 ```
 
@@ -45,11 +60,13 @@ npm run dev
 
 ## 默认配置
 
-提交版本默认不依赖真实模型 Key 和 Redis：
+提交版本默认不依赖真实模型 Key。当前推荐本地持久化使用 MySQL + Redis；如需零外部服务演示，可清空 `MYSQL_URL` 和 `REDIS_URL`，系统会回退到 SQLite + 内存状态。
 
 ```env
 LLM_PROVIDER=mock
-REDIS_URL=
+MYSQL_URL=mysql+pymysql://a3:123456@127.0.0.1:3306/a3_learning?charset=utf8mb4
+REDIS_URL=redis://127.0.0.1:6379/0
+VECTOR_STORE=memory
 ```
 
 如需演示真实模型，可参考 `.env.example` 配置 `LLM_PROVIDER=deepseek`、`qwen`、`dashscope`、`spark` 或 `openai_compatible`。
@@ -60,7 +77,7 @@ REDIS_URL=
 REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-Redis 未配置或不可用时，系统会自动使用 SQLite + 内存状态运行。
+Redis 未配置或不可用时，系统会自动使用数据库 + 内存状态运行。MySQL 未配置时，持久化层会使用 `backend/data/app.db`。
 
 ## 演示闭环
 
@@ -80,10 +97,12 @@ Redis 未配置或不可用时，系统会自动使用 SQLite + 内存状态运�
 
 ```bash
 cd backend
-.\.venv\Scripts\python.exe -m pytest tests -p no:cacheprovider
+.\.venv\Scripts\python.exe scripts\check_mysql_redis.py
+.\.venv\Scripts\python.exe scripts\migrate_sqlite_to_mysql.py --verify-only
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-当前结果：`28 passed`
+当前结果：`44 passed`
 
 前端构建：
 
@@ -96,6 +115,7 @@ npm run build
 
 - API 契约：`docs/api-contract.md`
 - LLM Provider 接入：`docs/llm-provider.md`
+- MySQL / Redis 存储：`docs/mysql-redis-storage.md`
 - Redis 可选缓存：`docs/redis-cache.md`
 - 演示 Runbook：`docs/delivery/demo-runbook.md`
 - 7 分钟演示脚本：`docs/delivery/demo-video-script.md`
@@ -106,7 +126,7 @@ npm run build
 
 ## 答辩表述建议
 
-本项目提交版采用 SQLite 保证零部署可复现，同时提供 Redis 可选缓存层提升任务状态同步能力。多智能体共享统一 LLM Provider，通过不同角色、提示词、输入上下文和执行顺序完成协作。默认 Mock 模式保证演示稳定，接入真实模型时可通过环境变量平滑切换。
+本项目当前采用 MySQL 作为 durable store、Redis 作为缓存层，同时保留 SQLite fallback 和迁移脚本，兼顾演示稳定性与工程部署能力。多智能体共享统一 LLM Provider，通过不同角色、提示词、输入上下文、RAG 课程证据和执行顺序完成协作。默认 Mock 模式保证演示稳定，接入真实模型时可通过环境变量平滑切换。
 
 ## 真实模型 Provider 切换
 

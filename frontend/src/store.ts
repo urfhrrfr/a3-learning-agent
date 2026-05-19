@@ -1,15 +1,19 @@
 import { defineStore } from 'pinia'
 import { api } from './api'
-import type { AgentTrace, AssessmentReport, HealthStatus, LearningPath, PlanSummary, Profile, Resource } from './types'
+import type { AgentTrace, AssessmentHistoryItem, AssessmentReport, GenerationHistoryItem, HealthStatus, LearningPath, LearningPathHistoryItem, PlanSummary, Profile, ProfileChatResponse, Resource } from './types'
 
 interface LearningState {
   health: HealthStatus | null
   profile: Profile | null
   resources: Resource[]
+  resourceHistory: GenerationHistoryItem[]
   planSummary: PlanSummary | null
   traces: AgentTrace[]
   path: LearningPath | null
+  pathHistory: LearningPathHistoryItem[]
   report: AssessmentReport | null
+  assessmentHistory: AssessmentHistoryItem[]
+  lastProfileUpdate: (ProfileChatResponse & { resources?: Resource[]; learning_path?: LearningPath | null; message?: string }) | null
   progress: number
   currentStep: string
   initialized: boolean
@@ -21,16 +25,38 @@ interface LearningState {
 }
 
 let refreshPromise: Promise<void> | null = null
+const ACTIVE_TASKS_STORAGE_KEY = 'a3_learning_has_active_tasks'
+const ACTIVE_ASSESSMENT_STORAGE_KEY = 'a3_learning_has_assessment_result'
+
+function hasActiveTasks() {
+  return localStorage.getItem(ACTIVE_TASKS_STORAGE_KEY) === 'true'
+}
+
+function hasAssessmentResult() {
+  return localStorage.getItem(ACTIVE_ASSESSMENT_STORAGE_KEY) === 'true'
+}
+
+function markActiveTasks() {
+  localStorage.setItem(ACTIVE_TASKS_STORAGE_KEY, 'true')
+}
+
+function markAssessmentResult() {
+  localStorage.setItem(ACTIVE_ASSESSMENT_STORAGE_KEY, 'true')
+}
 
 export const useLearningStore = defineStore('learning', {
   state: (): LearningState => ({
     health: null,
     profile: null,
     resources: [],
+    resourceHistory: [],
     planSummary: null,
     traces: [],
     path: null,
+    pathHistory: [],
     report: null,
+    assessmentHistory: [],
+    lastProfileUpdate: null,
     progress: 0,
     currentStep: '等待生成',
     initialized: false,
@@ -70,9 +96,10 @@ export const useLearningStore = defineStore('learning', {
         ])
         this.health = health
         this.profile = profile
-        this.resources = resources
-        this.path = path
-        this.report = report
+        this.resources = hasActiveTasks() ? resources : []
+        this.path = hasActiveTasks() ? path : null
+        this.report = hasAssessmentResult() ? report : null
+        await this.refreshHistories()
         this.initialized = true
       } catch (error) {
         this.error = friendlyErrorMessage(error, '初始化学习数据失败')
@@ -85,6 +112,7 @@ export const useLearningStore = defineStore('learning', {
         this.error = ''
         const previousVersion = this.profile?.version
         const data = await api.profileChatAndGenerate(message)
+        this.lastProfileUpdate = data
         const validation = data.fusion_meta?.validation
         if (validation?.requires_confirmation && previousVersion) {
           const warnings = validation.warnings.length ? `\n\n${validation.warnings.join('\n')}` : ''
@@ -100,10 +128,12 @@ export const useLearningStore = defineStore('learning', {
         this.profile = data.profile
         if (data.resources && data.resources.length > 0) {
           this.resources = data.resources
+          markActiveTasks()
         }
         if (data.learning_path) {
           this.path = data.learning_path
         }
+        await this.refreshHistories()
       } catch (error) {
         this.error = friendlyErrorMessage(error, '画像更新失败')
       }
@@ -125,7 +155,9 @@ export const useLearningStore = defineStore('learning', {
         this.error = ''
         const job = await api.generateBackground(request)
         await this.watchGenerationJob(job.id)
+        markActiveTasks()
         this.path = await api.path()
+        await this.refreshHistories()
         this.initialized = true
       } catch (error) {
         this.error = friendlyErrorMessage(error, '资源生成失败')
@@ -222,8 +254,11 @@ export const useLearningStore = defineStore('learning', {
       try {
         this.error = ''
         this.report = await api.submitQuiz(answers)
+        markActiveTasks()
+        markAssessmentResult()
         this.profile = await api.profile()
         this.path = this.report.adjusted_path
+        await this.refreshHistories()
       } catch (error) {
         this.error = friendlyErrorMessage(error, '评估提交失败')
       } finally {
@@ -241,6 +276,7 @@ export const useLearningStore = defineStore('learning', {
         } else {
           this.resources.push(quiz)
         }
+        await this.refreshHistories()
       } catch (error) {
         this.error = friendlyErrorMessage(error, '练习题刷新失败')
       } finally {
@@ -253,9 +289,21 @@ export const useLearningStore = defineStore('learning', {
         const result = await api.resourceFeedback(resourceId, action)
         this.resources = this.resources.map(resource => resource.id === resourceId ? result.resource : resource)
         if (result.learning_path) this.path = result.learning_path
+        markActiveTasks()
+        await this.refreshHistories()
       } catch (error) {
         this.error = friendlyErrorMessage(error, '资源反馈保存失败')
       }
+    },
+    async refreshHistories() {
+      const [resourceHistory, pathHistory, assessmentHistory] = await Promise.all([
+        api.resourceHistory(),
+        api.pathHistory(),
+        api.assessmentHistory()
+      ])
+      this.resourceHistory = hasActiveTasks() ? resourceHistory : resourceHistory.map(item => ({ ...item, is_current: false }))
+      this.pathHistory = hasActiveTasks() ? pathHistory : []
+      this.assessmentHistory = hasAssessmentResult() ? assessmentHistory : []
     }
   }
 })

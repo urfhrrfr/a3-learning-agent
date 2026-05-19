@@ -20,19 +20,19 @@
         <small>{{ store.profile?.course || '等待画像同步' }}</small>
       </article>
       <article class="metric-tile">
-        <span>我的薄弱点</span>
+        <span>档案薄弱点</span>
         <strong>{{ weakPointCount }}</strong>
         <small>{{ weakPointText }}</small>
+      </article>
+      <article class="metric-tile">
+        <span>本轮抽取</span>
+        <strong>{{ currentExtractionCount }}</strong>
+        <small>{{ currentExtractionSummary }}</small>
       </article>
       <article class="metric-tile">
         <span>学习偏好</span>
         <strong>{{ preferenceText }}</strong>
         <small>{{ store.profile?.time_budget || '时间安排未记录' }}</small>
-      </article>
-      <article class="metric-tile">
-        <span>当前章节</span>
-        <strong>{{ courseChapter }}</strong>
-        <small>雷达图仅表示画像信息完整度</small>
       </article>
     </section>
 
@@ -63,8 +63,54 @@
         :change-logs="changeLogs"
       />
 
-      <WeakPointCloud class="span-7" :profile="store.profile" :report="store.report" :path="store.path" />
+      <WeakPointCloud class="span-7" :profile="store.profile" :report="currentReport" :path="currentPath" />
       <ChatPanel class="span-5" :loading="loading" @send="send" />
+
+      <section class="panel span-6 profile-extraction-card">
+        <div class="panel-title">
+          <div>
+            <h2>本轮抽取结果</h2>
+            <p class="muted compact">只展示刚刚这句话带来的字段变化，不混入历史评估。</p>
+          </div>
+          <span class="status" :class="{ running: loading }">{{ loading ? '抽取中' : currentExtractionCount ? '已更新' : '等待输入' }}</span>
+        </div>
+        <div v-if="currentFieldItems.length" class="profile-fact-list">
+          <div v-for="item in currentFieldItems" :key="item.key">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.after }}</strong>
+            <small class="muted">之前：{{ item.before }}</small>
+          </div>
+        </div>
+        <div v-else class="empty small-empty">
+          <strong>还没有本轮抽取</strong>
+          <span>发送一句新的学习描述后，这里会单独显示本次识别到的目标、偏好、薄弱点或时间安排。</span>
+        </div>
+      </section>
+
+      <section class="panel span-6 profile-history-card">
+        <div class="panel-title">
+          <div>
+            <h2>历史学习档案</h2>
+            <p class="muted compact">这些内容来自之前的练习、资源或路径记录，不代表本句话新抽取。</p>
+          </div>
+          <span class="status">{{ historicalReport ? '有历史评估' : '无历史评估' }}</span>
+        </div>
+        <div v-if="historicalReport" class="profile-fact-list">
+          <div>
+            <span>历史评估薄弱点</span>
+            <strong>{{ historicalReport.weak_points.length ? historicalReport.weak_points.slice(0, 4).join('、') : '未返回结构化薄弱点' }}</strong>
+          </div>
+          <div>
+            <span>历史得分</span>
+            <strong>{{ historicalReport.score }} 分</strong>
+            <small class="muted">{{ historicalReport.created_at }}</small>
+          </div>
+        </div>
+        <div v-else class="empty small-empty">
+          <strong>暂无需要区分的历史评估</strong>
+          <span>完成练习后，历史评估会放在这里，避免和本轮画像抽取混在一起。</span>
+        </div>
+      </section>
 
       <details class="system-details span-12">
         <summary>查看更新记录</summary>
@@ -143,24 +189,23 @@ const latestConfidence = computed(() => {
   return typeof latest === 'number' ? latest : undefined
 })
 
-const confidenceLabel = computed(() => {
-  if (typeof latestConfidence.value !== 'number') return '未记录'
-  return `${Math.round(latestConfidence.value * 100)}%`
+const currentReport = computed(() => {
+  if (!realReport.value || !store.profile?.updated_at) return null
+  return Date.parse(realReport.value.created_at) >= Date.parse(store.profile.updated_at) ? realReport.value : null
 })
-
-const courseChapter = computed(() => {
-  if (!store.profile) return '未同步'
-  return `${store.profile.course} / ${store.profile.current_chapter}`
+const historicalReport = computed(() => realReport.value && realReport.value !== currentReport.value ? realReport.value : null)
+const currentPath = computed(() => {
+  if (!store.path || !store.profile?.updated_at) return null
+  return Date.parse(store.path.updated_at) >= Date.parse(store.profile.updated_at) ? store.path : null
 })
-
 const weakPointCount = computed(() => {
   const points = new Set<string>()
   for (const point of store.profile?.weak_points || []) points.add(point)
-  for (const point of realReport.value?.weak_points || []) points.add(point)
+  for (const point of currentReport.value?.weak_points || []) points.add(point)
   return points.size
 })
 const weakPointText = computed(() => {
-  const points = [...new Set([...(store.profile?.weak_points || []), ...(realReport.value?.weak_points || [])])]
+  const points = [...new Set([...(store.profile?.weak_points || []), ...(currentReport.value?.weak_points || [])])]
   return points.length ? points.slice(0, 3).join('、') : '暂未识别'
 })
 const preferenceText = computed(() => {
@@ -169,15 +214,30 @@ const preferenceText = computed(() => {
   return store.profile?.cognitive_style || '未记录'
 })
 const primaryAdvice = computed(() => {
-  if (realReport.value?.weak_points?.length) return '先补薄弱点'
+  if (currentReport.value?.weak_points?.length) return '先补薄弱点'
   if (store.profile?.learning_goal) return '按目标学习'
   return '先补充画像'
 })
 const adviceDetail = computed(() => {
-  if (realReport.value?.weak_points?.length) return `优先复习 ${realReport.value.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
+  if (currentReport.value?.weak_points?.length) return `优先复习 ${currentReport.value.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
   if (store.profile?.weak_points?.length) return `先从 ${store.profile.weak_points.slice(0, 2).join('、')} 开始巩固。`
   if (store.profile?.learning_goal) return '先生成一组学习资料，再按路径完成练习。'
   return '填写学习目标和当前困惑后，系统会给出更具体建议。'
+})
+
+const currentFieldItems = computed(() => {
+  const changedFields = store.lastProfileUpdate?.changed_fields || {}
+  return Object.entries(changedFields).map(([key, value]: [string, { before: unknown; after: unknown }]) => ({
+    key,
+    label: fieldLabels[key] || key,
+    before: formatProfileValue(value.before),
+    after: formatProfileValue(value.after)
+  }))
+})
+const currentExtractionCount = computed(() => currentFieldItems.value.length)
+const currentExtractionSummary = computed(() => {
+  if (!currentFieldItems.value.length) return '等待新的输入'
+  return currentFieldItems.value.map(item => item.label).slice(0, 3).join('、')
 })
 
 async function loadProfileMeta() {
@@ -211,5 +271,13 @@ function changedFieldLabels(log: ProfileChangeLog) {
   return Object.keys(log.changed_fields || {})
     .map(key => fieldLabels[key] || key)
     .slice(0, 5)
+}
+
+function formatProfileValue(value: unknown) {
+  if (Array.isArray(value)) return value.length ? value.join('、') : '空'
+  if (value === null || value === undefined || value === '') return '空'
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2)
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
 }
 </script>

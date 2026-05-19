@@ -58,7 +58,7 @@
       <section class="panel span-7 assessment-feedback-panel">
         <div class="panel-title">
           <div>
-            <h2>评估结论</h2>
+            <h2>本轮评估结论</h2>
             <p class="muted compact">先看哪里需要补，再按推荐任务继续学。</p>
           </div>
         <span v-if="store.report" class="status completed">{{ isDemoReport ? '演示占位' : '已生成' }}</span>
@@ -105,6 +105,34 @@
           </div>
         </section>
       </details>
+
+      <section class="panel span-12 history-panel">
+        <div class="panel-title">
+          <div>
+            <h2>历史学习结果</h2>
+            <p class="muted compact">本轮评估结论在上方，历史结果按提交时间归档。</p>
+          </div>
+          <span class="status pending">{{ historicalReports.length }} 条历史</span>
+        </div>
+        <div v-if="historicalReports.length" class="history-record-list">
+          <article v-for="report in historicalReports" :key="report.id" class="history-record">
+            <div class="history-record-head">
+              <div>
+                <strong>{{ report.score }} 分</strong>
+                <small>{{ formatDate(report.created_at) }} · 掌握度变化 {{ formatDelta(report.mastery_delta) }}</small>
+              </div>
+            </div>
+            <p class="muted compact">{{ report.feedback }}</p>
+            <div class="history-chip-row">
+              <span v-for="item in report.weak_points.slice(0, 5)" :key="item">{{ item }}</span>
+            </div>
+          </article>
+        </div>
+        <div v-else class="empty small-empty">
+          <strong>暂无历史结果</strong>
+          <span>完成新的练习评估后，旧结果会自动放入这里。</span>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -159,6 +187,17 @@ const masteryDeltaText = computed(() => {
   const percent = Math.round(store.report.mastery_delta * 100)
   return `${percent >= 0 ? '+' : ''}${percent}%`
 })
+const historicalReports = computed(() => store.assessmentHistory.filter(report => !report.is_current))
+
+function formatDate(value?: string | null) {
+  if (!value) return '时间未知'
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function formatDelta(value: number) {
+  const percent = Math.round(value * 100)
+  return `${percent >= 0 ? '+' : ''}${percent}%`
+}
 
 onMounted(store.ensureReady)
 </script>

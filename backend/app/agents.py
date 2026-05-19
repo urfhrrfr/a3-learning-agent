@@ -11,6 +11,7 @@ from .core.profile_validator import ProfileValidator
 from .knowledge import COURSE, find_chapter
 from .providers.base import BaseLLMProvider, LLMProviderError
 from .providers.factory import get_llm_provider
+from .retrieval import HybridRetriever, save_retrieval_log
 from .prompts import (
     build_profile_extraction_prompt,
     build_profile_semantic_fusion_prompt,
@@ -438,6 +439,17 @@ class KnowledgeAgent(Agent):
     depends_on = ["ProfileAgent"]
     max_candidates = 12
     top_k = 5
+    preferred_sections_by_resource_type = {
+        "lecture_doc": {"objectives", "concept_cards", "detailed_concepts", "difficulties", "misconceptions", "real_cases"},
+        "mind_map": {"objectives", "concept_cards", "detailed_concepts", "misconceptions"},
+        "quiz": {"practice_questions", "detailed_concepts", "misconceptions"},
+        "reading": {"reading", "real_cases", "code_labs", "difficulties"},
+        "media_script": {"real_cases", "misconceptions", "detailed_concepts"},
+        "animation_demo": {"detailed_concepts", "misconceptions", "real_cases"},
+        "ppt_draft": {"objectives", "detailed_concepts", "real_cases"},
+        "visual_card": {"concept_cards", "detailed_concepts", "misconceptions", "practice_questions"},
+        "code_case": {"code_labs", "real_cases", "detailed_concepts"},
+    }
 
     section_labels = {
         "objectives": "学习目标",
@@ -614,27 +626,44 @@ class KnowledgeAgent(Agent):
             )
         return selected
 
+    def _preferred_sections(self, state: WorkflowState) -> set[str]:
+        sections: set[str] = set()
+        requested_types = state.request.resource_types or []
+        for resource_type in requested_types:
+            sections.update(self.preferred_sections_by_resource_type.get(resource_type, set()))
+        return sections
+
     def run(self, state: WorkflowState) -> dict:
         query = self._current_query(state)
         profile_context = self._profile_context(state)
-        candidates = self._prefilter_candidates(state, query, profile_context)
-        candidates_by_id = {item["id"]: item for item in candidates}
-        selected: list[dict] = []
-        warnings: list[str] = []
-
-        prompt = self._build_rerank_prompt(query, profile_context, candidates)
-        try:
-            selected = self._normalize_rerank_result(parse_llm_json(self.llm.complete(prompt)), candidates_by_id)
-        except (json.JSONDecodeError, LLMProviderError, Exception) as exc:  # noqa: BLE001
-            warnings.append(f"LLM rerank 不可用，已使用本地轻量排序兜底: {exc}")
-
-        if not selected:
-            selected = self._fallback_rerank(candidates)
+        retriever = HybridRetriever(COURSE, llm=self.llm, max_candidates=self.max_candidates, top_k=self.top_k)
+        selected, warnings = retriever.retrieve(
+            query=query,
+            profile_context=profile_context,
+            current_chapter_id=state.chapter["id"],
+            preferred_sections=self._preferred_sections(state),
+        )
 
         state.sources = selected
+        save_retrieval_log(
+            scenario="resource_generation",
+            job_id=state.job_id,
+            query=query,
+            profile_snapshot=state.profile.model_dump(),
+            selected_sources=selected,
+            request_context={
+                "course": state.request.course,
+                "chapter": state.request.chapter,
+                "goal": state.request.goal,
+                "pain_points": state.request.pain_points,
+                "resource_types": state.request.resource_types,
+                "current_chapter_id": state.chapter["id"],
+            },
+            warnings=warnings,
+        )
         avg_score = sum(item["relevance_score"] for item in selected) / max(len(selected), 1)
         return {
-            "summary": f"语义检索到 {len(selected)} 个与“{query}”最相关的知识片段",
+            "summary": f"语义检索到 {len(selected)} 个与“{query}”最相关的课程知识片段（RAG）",
             "confidence": round(avg_score, 2),
             "warnings": warnings,
         }
@@ -1899,6 +1928,13 @@ class ReviewAgent(Agent):
     def _inline_source_ids(content: str) -> list[str]:
         return [match.strip() for match in re.findall(r"\[来源:\s*([^\]]+?)\s*\]", content)]
 
+    @staticmethod
+    def _inline_source_matches(content: str) -> list[tuple[str, int, int]]:
+        return [
+            (match.group(1).strip(), match.start(), match.end())
+            for match in re.finditer(r"\[来源:\s*([^\]]+?)\s*\]", content)
+        ]
+
     def _invalid_evidence_ids(self, resource: Resource, chapter: dict) -> list[str]:
         allowed_refs = self._allowed_source_refs(chapter)
         invalid_ids = []
@@ -1934,6 +1970,37 @@ class ReviewAgent(Agent):
             if len(overlap) >= 1:
                 hit_ids.append(evidence.id)
         return bool(hit_ids), hit_ids[:5]
+
+    def _evidence_overlap_report(self, resource: Resource) -> dict:
+        content_tokens = self._evidence_keywords(resource.content)
+        evidence_tokens_by_id = {
+            evidence.id: self._evidence_keywords(evidence.text)
+            for evidence in resource.evidence_sources
+            if evidence.text.strip()
+        }
+        evidence_tokens = set().union(*evidence_tokens_by_id.values()) if evidence_tokens_by_id else set()
+        overlap = content_tokens & evidence_tokens
+        denominator = max(min(len(content_tokens), 30), 1)
+        coverage_score = min(1.0, len(overlap) / denominator)
+        weak_inline_ids: list[str] = []
+        inline_overlaps: dict[str, list[str]] = {}
+
+        for source_id, start, end in self._inline_source_matches(resource.content):
+            evidence_tokens_for_id = evidence_tokens_by_id.get(source_id, set())
+            if not evidence_tokens_for_id:
+                continue
+            window = resource.content[max(0, start - 60) : min(len(resource.content), end + 60)]
+            window_overlap = self._evidence_keywords(window) & evidence_tokens_for_id
+            inline_overlaps[source_id] = sorted(window_overlap)[:8]
+            if len(window_overlap) < 2:
+                weak_inline_ids.append(source_id)
+
+        return {
+            "coverage_score": round(coverage_score, 2),
+            "overlap_keywords": sorted(overlap)[:10],
+            "weak_inline_ids": weak_inline_ids,
+            "inline_overlaps": inline_overlaps,
+        }
 
     def _evidence_review(self, resource: Resource, chapter: dict) -> dict:
         issues: list[str] = []
@@ -1972,12 +2039,27 @@ class ReviewAgent(Agent):
         else:
             notes.append(f"内容命中的证据片段：{'、'.join(hit_ids)}")
 
+        overlap_report = self._evidence_overlap_report(resource)
+        if overlap_report["coverage_score"] < 0.08:
+            issues.append("正文与证据关键词重叠不足")
+            notes.append(f"证据覆盖分过低：{overlap_report['coverage_score']:.2f}")
+        else:
+            notes.append(f"证据覆盖分：{overlap_report['coverage_score']:.2f}")
+        if overlap_report["overlap_keywords"]:
+            notes.append(f"证据重叠关键词：{'、'.join(overlap_report['overlap_keywords'][:8])}")
+
+        if overlap_report["weak_inline_ids"]:
+            issues.append("正文引用附近未命中对应证据")
+            notes.append(f"引用附近缺少对应证据支撑：{'、'.join(overlap_report['weak_inline_ids'][:5])}")
+
         return {
             "passed": not issues,
             "issues": issues,
             "notes": notes,
             "inline_ids": inline_ids,
             "hit_ids": hit_ids,
+            "coverage_score": overlap_report["coverage_score"],
+            "overlap_keywords": overlap_report["overlap_keywords"],
         }
 
     def run(self, state: WorkflowState) -> dict:
