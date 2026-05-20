@@ -219,7 +219,7 @@ def latest_generation_job_id() -> str:
     return latest.id
 
 
-def generation_history(limit: int = 20) -> list[dict]:
+def _generation_history_jobs(limit: int = 20) -> tuple[list[GenerationJob], str]:
     loaded = []
     for item in load_records("job"):
         try:
@@ -235,13 +235,48 @@ def generation_history(limit: int = 20) -> list[dict]:
         if job.resources or job.status in {"queued", "running", "failed"}
     ]
     candidates = sorted(candidates, key=lambda item: item.completed_at or item.created_at, reverse=True)
+    return candidates[: max(1, min(limit, 100))], current_id
+
+
+def _resource_type_counts(job: GenerationJob) -> list[dict[str, int | str]]:
+    counts: dict[str, int] = {}
+    for resource in job.resources:
+        counts[resource.type] = counts.get(resource.type, 0) + 1
+    return [{"type": resource_type, "count": count} for resource_type, count in counts.items()]
+
+
+def generation_history(limit: int = 20) -> list[dict]:
+    candidates, current_id = _generation_history_jobs(limit)
     return [
         {
-            **job.model_dump(),
+            "id": job.id,
+            "status": job.status,
+            "progress": job.progress,
+            "current_step": job.current_step,
+            "request": job.request.model_dump(),
+            "plan_summary": job.plan_summary.model_dump(),
+            "fallback_reason": job.fallback_reason,
+            "created_at": job.created_at,
+            "completed_at": job.completed_at,
             "is_current": job.id == current_id,
+            "resource_count": len(job.resources),
+            "resource_type_counts": _resource_type_counts(job),
+            "trace_count": len(job.traces),
+            "event_count": len(job.events),
         }
-        for job in candidates[: max(1, min(limit, 100))]
+        for job in candidates
     ]
+
+
+def generation_history_detail(job_id: str) -> dict | None:
+    job = get_job(job_id)
+    if not job or not (job.resources or job.status in {"queued", "running", "failed"}):
+        return None
+    current_id = latest_generation_job_id()
+    return {
+        **job.model_dump(),
+        "is_current": job.id == current_id,
+    }
 
 
 def learning_path_history(limit: int = 20) -> list[dict]:

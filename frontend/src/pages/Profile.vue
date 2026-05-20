@@ -6,10 +6,13 @@
         <h1>先看和我学习有关的事</h1>
         <p>这里展示我的学习目标、薄弱点、学习偏好和系统建议。</p>
       </div>
-      <div class="today-focus-card">
-        <span>系统给我的建议</span>
-        <strong>{{ primaryAdvice }}</strong>
-        <p>{{ adviceDetail }}</p>
+      <div class="profile-hero-visual-card" aria-label="学习画像生成个性化建议">
+        <img class="profile-hero-visual-image" :src="profileRecommendationHero" alt="学习画像生成个性化建议的示意图" />
+        <div>
+          <span>系统给我的建议</span>
+          <strong>{{ primaryAdvice }}</strong>
+          <p>{{ adviceDetail }}</p>
+        </div>
       </div>
     </section>
 
@@ -37,34 +40,37 @@
     </section>
 
     <div class="grid profile-center-grid">
-      <section class="panel span-5 profile-facts-card">
-        <div class="panel-title">
-          <div>
-            <h2>我现在适合怎么学</h2>
-            <p class="muted compact">这些建议来自已有画像字段，不补写后端没有的数据。</p>
+      <ChatPanel class="span-12" featured :loading="loading" @send="send" />
+
+      <div class="profile-advice-pair span-12">
+        <section class="panel profile-facts-card">
+          <div class="panel-title">
+            <div>
+              <h2>我现在适合怎么学</h2>
+              <p class="muted compact">根据你已经告诉我的目标、薄弱点和学习偏好，整理出当前最适合的学习建议。</p>
+            </div>
           </div>
-        </div>
-        <div v-if="store.profile" class="profile-fact-list">
-          <div><span>学习目标</span><strong>{{ store.profile.learning_goal || '未填写' }}</strong></div>
-          <div><span>薄弱点</span><strong>{{ weakPointText }}</strong></div>
-          <div><span>喜欢的材料</span><strong>{{ preferenceText }}</strong></div>
-          <div><span>建议</span><strong>{{ adviceDetail }}</strong></div>
-        </div>
-        <div v-else class="empty small-empty">
-          <strong>画像尚未同步</strong>
-          <span>可以先通过对话补充学习目标和薄弱点。</span>
-        </div>
-      </section>
+          <div v-if="store.profile" class="profile-fact-list">
+            <div><span>学习目标</span><strong>{{ store.profile.learning_goal || '未填写' }}</strong></div>
+            <div><span>薄弱点</span><strong>{{ weakPointText }}</strong></div>
+            <div><span>喜欢的材料</span><strong>{{ preferenceText }}</strong></div>
+            <div><span>建议</span><strong>{{ adviceDetail }}</strong></div>
+          </div>
+          <div v-else class="empty small-empty">
+            <strong>画像尚未同步</strong>
+            <span>可以先通过对话补充学习目标和薄弱点。</span>
+          </div>
+        </section>
+
+        <WeakPointCloud :profile="store.profile" :report="currentReport" :path="currentPath" />
+      </div>
 
       <ProfileRadar
-        class="span-7"
+        class="span-12"
         :profile="store.profile"
         :latest-confidence="latestConfidence"
         :change-logs="changeLogs"
       />
-
-      <WeakPointCloud class="span-7" :profile="store.profile" :report="currentReport" :path="currentPath" />
-      <ChatPanel class="span-5" :loading="loading" @send="send" />
 
       <section class="panel span-6 profile-extraction-card">
         <div class="panel-title">
@@ -98,7 +104,7 @@
         <div v-if="historicalReport" class="profile-fact-list">
           <div>
             <span>历史评估薄弱点</span>
-            <strong>{{ historicalReport.weak_points.length ? historicalReport.weak_points.slice(0, 4).join('、') : '未返回结构化薄弱点' }}</strong>
+            <strong>{{ historicalReport.weak_points.length ? historicalReport.weak_points.slice(0, 4).join('、') : '暂未发现新的薄弱点' }}</strong>
           </div>
           <div>
             <span>历史得分</span>
@@ -153,6 +159,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
+import profileRecommendationHero from '../assets/profile-recommendation-hero.png'
 import ChatPanel from '../components/ChatPanel.vue'
 import ProfileRadar from '../components/ProfileRadar.vue'
 import WeakPointCloud from '../components/WeakPointCloud.vue'

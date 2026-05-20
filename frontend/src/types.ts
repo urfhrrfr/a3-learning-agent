@@ -169,6 +169,28 @@ export interface GenerationHistoryItem extends GenerationJob {
   is_current?: boolean
 }
 
+export interface ResourceTypeCount {
+  type: string
+  count: number
+}
+
+export interface GenerationHistorySummary {
+  id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  current_step: string
+  request: Required<GenerateRequest>
+  plan_summary: PlanSummary
+  fallback_reason?: string
+  created_at: string
+  completed_at: string | null
+  is_current?: boolean
+  resource_count: number
+  resource_type_counts: ResourceTypeCount[]
+  trace_count: number
+  event_count: number
+}
+
 export interface GenerationEvent {
   type: string
   payload: Record<string, unknown>

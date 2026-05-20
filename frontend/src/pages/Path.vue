@@ -1,17 +1,22 @@
 <template>
   <div class="page path-center-page">
-    <section class="student-hero">
+    <section class="student-hero path-task-hero">
       <div>
         <span class="eyebrow">我的学习任务</span>
         <h1>按顺序完成三步就好</h1>
         <p>先看下一步学什么、练什么、做什么，按顺序完成即可。</p>
       </div>
-      <div class="today-focus-card">
-        <span>路径完成度</span>
-        <strong>{{ completionPercent }}%</strong>
-        <small>{{ completedSteps }}/{{ totalSteps }} 个阶段已完成</small>
-        <div class="home-progress" aria-label="路径完成度">
-          <div :style="{ width: `${completionPercent}%` }"></div>
+      <div class="path-hero-visual-card" aria-label="三步学习任务路线">
+        <img class="path-hero-visual-image" :src="learningPathHero" alt="按三步完成学习任务的路线示意图" />
+        <div class="path-hero-progress">
+          <div>
+            <span>路径完成度</span>
+            <strong>{{ completionPercent }}%</strong>
+            <small>{{ completedSteps }}/{{ totalSteps }} 个阶段已完成</small>
+          </div>
+          <div class="home-progress" aria-label="路径完成度">
+            <div :style="{ width: `${completionPercent}%` }"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -132,6 +137,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import learningPathHero from '../assets/learning-path-hero.png'
 import LearningPathStageCard from '../components/LearningPathStageCard.vue'
 import { useLearningStore } from '../store'
 

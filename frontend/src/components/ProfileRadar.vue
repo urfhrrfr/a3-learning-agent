@@ -9,38 +9,49 @@
     </div>
 
     <div v-if="profile" class="radar-layout">
-      <svg class="radar-svg" viewBox="0 0 240 240" role="img" aria-label="画像完整度雷达图">
-        <polygon
-          v-for="ring in rings"
-          :key="ring"
-          class="radar-ring"
-          :points="polygonPoints(ring)"
-        />
-        <line
-          v-for="axis in axes"
-          :key="axis.label"
-          class="radar-axis"
-          :x1="center"
-          :y1="center"
-          :x2="axisPoint(axis.index, maxRadius).x"
-          :y2="axisPoint(axis.index, maxRadius).y"
-        />
-        <polygon class="radar-area" :points="valuePoints" />
-        <circle
-          v-for="axis in axes"
-          :key="`${axis.label}-dot`"
-          class="radar-dot"
-          :cx="axisPoint(axis.index, scoreRadius(axis.score)).x"
-          :cy="axisPoint(axis.index, scoreRadius(axis.score)).y"
-          r="4"
-        />
-      </svg>
+      <div class="radar-stage">
+        <div class="radar-score-orb">
+          <strong>{{ overallScore }}%</strong>
+          <span>完整度</span>
+        </div>
+        <svg class="radar-svg" viewBox="0 0 240 240" role="img" aria-label="画像完整度雷达图">
+          <polygon
+            v-for="ring in rings"
+            :key="ring"
+            class="radar-ring"
+            :points="polygonPoints(ring)"
+          />
+          <line
+            v-for="axis in axes"
+            :key="axis.label"
+            class="radar-axis"
+            :x1="center"
+            :y1="center"
+            :x2="axisPoint(axis.index, maxRadius).x"
+            :y2="axisPoint(axis.index, maxRadius).y"
+          />
+          <polygon class="radar-area" :points="valuePoints" />
+          <circle
+            v-for="axis in axes"
+            :key="`${axis.label}-dot`"
+            class="radar-dot"
+            :cx="axisPoint(axis.index, scoreRadius(axis.score)).x"
+            :cy="axisPoint(axis.index, scoreRadius(axis.score)).y"
+            r="4"
+          />
+        </svg>
+      </div>
 
       <div class="radar-legend">
         <div v-for="axis in axes" :key="axis.label" class="radar-legend-row">
-          <span>{{ axis.label }}</span>
+          <div>
+            <span>{{ axis.label }}</span>
+            <small>{{ axis.reason }}</small>
+          </div>
           <strong>{{ axis.score }}%</strong>
-          <small>{{ axis.reason }}</small>
+          <div class="radar-meter" aria-hidden="true">
+            <i :style="{ width: `${axis.score}%` }"></i>
+          </div>
         </div>
       </div>
     </div>

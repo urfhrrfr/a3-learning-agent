@@ -5,6 +5,7 @@ import type {
   GenerateRequest,
   GenerationJob,
   GenerationHistoryItem,
+  GenerationHistorySummary,
   HealthStatus,
   LearningPath,
   LearningPathHistoryItem,
@@ -76,7 +77,8 @@ export const api = {
   generationEventsUrl: (job_id: string) => `${API_BASE}/api/jobs/${job_id}/events`,
   job: (job_id: string) => request<GenerationJob>(`/api/jobs/${job_id}`),
   resources: () => request<Resource[]>('/api/resources'),
-  resourceHistory: () => request<GenerationHistoryItem[]>('/api/resources/history'),
+  resourceHistory: () => request<GenerationHistorySummary[]>('/api/resources/history'),
+  resourceHistoryDetail: (job_id: string) => request<GenerationHistoryItem>(`/api/resources/history/${job_id}`),
   resource: (resource_id: string) => request<Resource>(`/api/resources/${resource_id}`),
   resourceFeedback: (resource_id: string, action: Resource['user_feedback']) =>
     request<{ resource: Resource; learning_path: LearningPath | null }>('/api/resources/feedback', {

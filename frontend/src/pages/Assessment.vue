@@ -1,15 +1,23 @@
 <template>
   <div class="page assessment-center-page">
-    <section class="student-hero">
-      <div>
-        <span class="eyebrow">学习结果</span>
+    <section class="student-hero assessment-result-hero">
+      <div class="assessment-hero-copy">
+        <span class="assessment-hero-badge">学习结果</span>
         <h1>先看结论，再决定怎么补</h1>
         <p>先看得分、主要薄弱点和下一步补救任务，详细分析放在下方。</p>
+        <div class="assessment-hero-points" aria-label="学习结果重点">
+          <span>得分诊断</span>
+          <span>薄弱点定位</span>
+          <span>补救任务</span>
+        </div>
       </div>
-      <div class="today-focus-card">
-        <span>{{ isDemoReport ? '练习状态' : '本次得分' }}</span>
-        <strong>{{ store.report && !isDemoReport ? `${store.report.score} 分` : '待提交' }}</strong>
-        <p>{{ store.report ? scoreConclusion : '完成练习后生成报告' }}</p>
+      <div class="assessment-hero-visual-card" aria-label="学习结果诊断状态">
+        <img class="assessment-hero-visual-image" :src="assessmentResultsHero" alt="学习结果诊断和补救任务的示意图" />
+        <div>
+          <span>{{ isDemoReport ? '练习状态' : '本次得分' }}</span>
+          <strong>{{ store.report && !isDemoReport ? `${store.report.score} 分` : '待提交' }}</strong>
+          <small>{{ store.report ? scoreConclusion : '完成练习后生成报告' }}</small>
+        </div>
       </div>
     </section>
 
@@ -139,6 +147,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import assessmentResultsHero from '../assets/assessment-results-hero.png'
 import QuizPlayer from '../components/QuizPlayer.vue'
 import type { QuizQuestion } from '../components/QuizPlayer.vue'
 import { isDemoAssessmentReport, useLearningStore } from '../store'

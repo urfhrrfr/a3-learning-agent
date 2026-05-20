@@ -1,10 +1,17 @@
 <template>
   <div class="page tutor-center-page">
     <section class="student-hero">
-      <div>
-        <span class="eyebrow">智能导师</span>
-        <h1>像聊天一样把问题问清楚</h1>
-        <p>提出问题后，导师会给出解释、下一步建议和小练习；需要时可以展开查看回答依据。</p>
+      <div class="tutor-hero-intro">
+        <img class="tutor-hero-image" :src="tutorChatHero" alt="智能导师通过对话解释问题的示意图" />
+        <div class="tutor-hero-copy">
+          <span class="tutor-hero-badge">智能导师</span>
+          <h1>像聊天一样把问题问清楚</h1>
+          <p>提出问题后，导师会给出解释、下一步建议和小练习；需要时可以展开查看回答依据。</p>
+          <div class="tutor-hero-points" aria-label="导师能力">
+            <span>解释概念</span>
+            <span>安排下一步</span>
+          </div>
+        </div>
       </div>
       <div class="today-focus-card">
         <span>当前学习状态</span>
@@ -13,15 +20,15 @@
       </div>
     </section>
 
-    <div class="grid tutor-center-grid">
-      <section class="panel span-4 tutor-question-panel">
-        <div class="panel-title">
+    <div class="tutor-workbench">
+      <section class="tutor-question-panel">
+        <div class="tutor-workbench-title">
           <div>
             <h2>问题输入</h2>
             <p class="muted compact">可以直接问概念、题目或材料里没看懂的地方。</p>
           </div>
         </div>
-        <label class="field">
+        <label class="tutor-resource-select">
           <span>引用资源</span>
           <select v-model="selectedResourceId" :disabled="asking">
             <option value="">自动选择相关资源</option>
@@ -46,12 +53,12 @@
         <div v-if="localError" class="empty error-state">
           <strong>导师暂时没有返回答案</strong>
           <span>{{ localError }}</span>
-          <button class="btn secondary" type="button" :disabled="asking || !lastFailedQuestion" @click="retryLastQuestion">重试上一问</button>
+            <button class="btn secondary" type="button" :disabled="asking || !lastFailedQuestion" @click="retryLastQuestion">重试上一问</button>
         </div>
 
       </section>
 
-      <main class="span-8 tutor-main-stack">
+      <main class="tutor-main-stack">
         <TutorAnswerPanel
           :answer="latestAnswer"
           :loading="asking"
@@ -64,7 +71,9 @@
         />
         <MermaidRenderer v-if="mermaid" :content="mermaid" />
       </main>
+    </div>
 
+    <div class="grid tutor-center-grid">
       <details class="system-details span-12">
         <summary>为什么这样回答？</summary>
         <section class="panel user-explain-panel">
@@ -115,6 +124,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
+import tutorChatHero from '../assets/tutor-chat-hero.png'
 import MarkdownRenderer from '../components/MarkdownRenderer.vue'
 import MermaidRenderer from '../components/MermaidRenderer.vue'
 import TutorAnswerPanel from '../components/TutorAnswerPanel.vue'

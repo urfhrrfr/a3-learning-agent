@@ -163,6 +163,23 @@ JOB_FIELDS = {
     "completed_at",
 }
 
+HISTORY_SUMMARY_FIELDS = {
+    "id",
+    "status",
+    "progress",
+    "current_step",
+    "request",
+    "plan_summary",
+    "fallback_reason",
+    "created_at",
+    "completed_at",
+    "is_current",
+    "resource_count",
+    "resource_type_counts",
+    "trace_count",
+    "event_count",
+}
+
 PATH_FIELDS = {
     "id",
     "profile_version",
@@ -847,6 +864,24 @@ def test_api_contract_endpoints_return_documented_shapes():
     assert_fields(fetched_job, JOB_FIELDS)
     assert fetched_job["id"] == job["id"]
 
+    history = payload(client.get("/api/resources/history"))
+    assert isinstance(history, list)
+    assert history
+    history_summary = next(item for item in history if item["id"] == job["id"])
+    assert_fields(history_summary, HISTORY_SUMMARY_FIELDS)
+    assert "resources" not in history_summary
+    assert "traces" not in history_summary
+    assert "events" not in history_summary
+    assert history_summary["resource_count"] == len(job["resources"])
+    assert history_summary["resource_type_counts"]
+
+    history_detail = payload(client.get(f"/api/resources/history/{job['id']}"))
+    assert_fields(history_detail, JOB_FIELDS | {"is_current"})
+    assert history_detail["id"] == job["id"]
+    assert history_detail["resources"]
+    assert isinstance(history_detail["traces"], list)
+    assert isinstance(history_detail["events"], list)
+
     resources = payload(client.get("/api/resources"))
     assert isinstance(resources, list)
     assert resources
@@ -886,6 +921,10 @@ def test_error_responses_use_api_envelope():
     job_error = error_payload(client.get("/api/jobs/not_found"), 404)
     assert job_error["code"] == "JOB_NOT_FOUND"
     assert job_error["message"] == "job not found"
+
+    history_job_error = error_payload(client.get("/api/resources/history/not_found"), 404)
+    assert history_job_error["code"] == "JOB_NOT_FOUND"
+    assert history_job_error["message"] == "history job not found"
 
     resource_error = error_payload(client.get("/api/resources/not_found"), 404)
     assert resource_error["code"] == "RESOURCE_NOT_FOUND"

@@ -393,6 +393,14 @@ def resources_history(limit: int = 20):
     return ok(state.generation_history(limit))
 
 
+@router.get("/resources/history/{job_id}")
+def resources_history_detail(job_id: str):
+    job = state.generation_history_detail(job_id)
+    if job:
+        return ok(job)
+    raise HTTPException(status_code=404, detail="history job not found")
+
+
 @router.get("/resources/{resource_id}")
 def get_resource(resource_id: str):
     resource = state.get_resource(resource_id)
