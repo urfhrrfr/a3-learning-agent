@@ -10,6 +10,20 @@
           <RouterLink class="btn ghost" to="/generate">生成资料</RouterLink>
           <RouterLink class="btn ghost" to="/tutor">问智能导师</RouterLink>
         </div>
+        <div class="hero-summary-strip" aria-label="今日学习状态摘要">
+          <span>
+            <small>当前建议</small>
+            <strong>{{ nextAction.title }}</strong>
+          </span>
+          <span>
+            <small>薄弱点</small>
+            <strong>{{ weakPointSummary }}</strong>
+          </span>
+          <span>
+            <small>资料</small>
+            <strong>{{ resourceSummary }}</strong>
+          </span>
+        </div>
       </div>
 
       <div class="resource-visual-card" aria-label="资源生成入口">

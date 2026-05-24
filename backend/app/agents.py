@@ -62,6 +62,17 @@ class WorkflowState:
         self.profile = profile
         self.chapter = find_chapter(request.chapter)
         self.sources: list[str | dict] = [f"{self.chapter['id']}#overview", f"{self.chapter['id']}#practice"]
+        self.current_query = "；".join(
+            item
+            for item in [
+                request.raw_user_need,
+                request.goal,
+                request.chapter,
+                "、".join(request.target_concepts or []),
+                "、".join(request.pain_points or []),
+            ]
+            if item
+        )
         self.resources: list[Resource] = []
         self.traces: list[AgentTrace] = []
         self.plan: list[str] = []
@@ -657,6 +668,9 @@ class KnowledgeAgent(Agent):
                 "goal": state.request.goal,
                 "pain_points": state.request.pain_points,
                 "resource_types": state.request.resource_types,
+                "target_concepts": state.request.target_concepts,
+                "raw_user_need": state.request.raw_user_need,
+                "chapter_match_confidence": state.request.chapter_match_confidence,
                 "current_chapter_id": state.chapter["id"],
             },
             warnings=warnings,
@@ -990,6 +1004,7 @@ class ResourceAgent(Agent):
         target_profile = [
             state.profile.cognitive_style,
             *state.profile.preferred_modalities[:2],
+            *state.request.target_concepts[:3],
         ]
         if plan_item.get("reason"):
             target_profile.append(str(plan_item["reason"]))
@@ -1003,6 +1018,12 @@ class ResourceAgent(Agent):
             source_refs=self.source_refs(state),
             difficulty=str(plan_item.get("difficulty") or "入门到提高"),
             target_profile=target_profile,
+            personalized_reason=(
+                f"本次需求：{state.request.raw_user_need or state.request.goal}；"
+                f"匹配章节：{state.chapter['title']}；"
+                f"匹配置信度：{state.request.chapter_match_confidence:.2f}；"
+                f"目标概念：{'、'.join(state.request.target_concepts) or '按章节核心概念'}。"
+            ),
             review_status="needs_revision",
             created_by_agents=["KnowledgeAgent", self.name],
             created_at=now(),
@@ -1573,48 +1594,145 @@ class AnimationDemoAgent(ResourceAgent):
     boundary = "生成可在前端直接播放的动态图解脚本，不导出 mp4 成片"
     depends_on = ["PlannerAgent", "KnowledgeAgent"]
 
+    allowed_templates = {"flow", "compare", "network", "search", "dialogue", "risk"}
+
+    template_keywords = {
+        "network": {"神经网络", "注意力", "知识图谱", "图", "连接", "权重", "节点"},
+        "search": {"搜索", "路径", "规划", "强化学习", "状态", "智能体", "奖励", "策略"},
+        "dialogue": {"提示词", "prompt", "对话", "问答", "自然语言", "生成", "聊天", "大模型", "语言模型", "大语言模型"},
+        "compare": {"过拟合", "泛化", "监督", "无监督", "分类", "回归", "对比", "区别"},
+        "risk": {"伦理", "偏见", "隐私", "安全", "公平", "风险", "幻觉", "可信"},
+    }
+
+    def _animation_template(self, state: WorkflowState) -> str:
+        text = " ".join(
+            [
+                state.chapter["title"],
+                *map(str, state.chapter.get("concepts", [])),
+                *map(str, state.profile.weak_points),
+                state.request.goal,
+            ]
+        ).lower()
+        for template, keywords in self.template_keywords.items():
+            if any(keyword.lower() in text for keyword in keywords):
+                return template
+        return "flow"
+
+    def _visual_for_template(self, template: str, index: int) -> str:
+        visuals = {
+            "flow": ["flow_input", "flow_process", "flow_feedback", "flow_check"],
+            "compare": ["compare_left", "compare_right", "compare_gap", "compare_fix"],
+            "network": ["network_nodes", "network_signal", "network_weight", "network_output"],
+            "search": ["search_start", "search_try", "search_reward", "search_path"],
+            "dialogue": ["dialogue_prompt", "dialogue_context", "dialogue_reason", "dialogue_answer"],
+            "risk": ["risk_case", "risk_signal", "risk_choice", "risk_guardrail"],
+        }
+        return visuals.get(template, visuals["flow"])[index]
+
+    def _normalize_animation_payload(self, parsed: dict, state: WorkflowState, fallback: str) -> dict:
+        fallback_payload = json.loads(fallback)
+        template = str(parsed.get("template") or "").strip().lower()
+        if template not in self.allowed_templates:
+            template = self._animation_template(state)
+
+        fallback_frames = fallback_payload.get("frames", [])
+        raw_frames = parsed.get("frames") if isinstance(parsed.get("frames"), list) else []
+        frames = []
+        for index in range(4):
+            raw = raw_frames[index] if index < len(raw_frames) and isinstance(raw_frames[index], dict) else {}
+            base = fallback_frames[index] if index < len(fallback_frames) and isinstance(fallback_frames[index], dict) else {}
+            scene_objects = raw.get("scene_objects")
+            if not isinstance(scene_objects, list) or len(scene_objects) < 4:
+                scene_objects = base.get("scene_objects", ["输入信息", "处理过程", "输出结果", "检查效果"])
+            frames.append(
+                {
+                    "id": str(raw.get("id") or base.get("id") or f"frame_{index + 1:02d}"),
+                    "title": str(raw.get("title") or base.get("title") or f"第 {index + 1} 幕"),
+                    "caption": str(raw.get("caption") or base.get("caption") or "用一个简单场景解释这个知识点。"),
+                    "focus": str(raw.get("focus") or base.get("focus") or state.chapter["title"]),
+                    "visual": str(raw.get("visual") or self._visual_for_template(template, index)),
+                    "scene_objects": [str(item) for item in scene_objects[:4]],
+                    "metric": str(raw.get("metric") or base.get("metric") or "观察重点"),
+                    "takeaway": str(raw.get("takeaway") or base.get("takeaway") or "先看懂场景，再记住概念。"),
+                }
+            )
+
+        return {
+            "kind": "in_app_animation",
+            "template": template,
+            "topic": str(parsed.get("topic") or state.chapter["title"]),
+            "duration_seconds": int(parsed.get("duration_seconds") or fallback_payload.get("duration_seconds") or 36),
+            "playback_note": str(
+                parsed.get("playback_note")
+                or fallback_payload.get("playback_note")
+                or "这是系统内可播放的初学者动画小课。"
+            ),
+            "scenario": str(parsed.get("scenario") or fallback_payload.get("scenario") or state.chapter["title"]),
+            "frames": frames,
+            "teacher_prompt": str(
+                parsed.get("teacher_prompt")
+                or fallback_payload.get("teacher_prompt")
+                or "播放时用生活化语言解释每一幕。"
+            ),
+        }
+
     def content(self, state: WorkflowState) -> str:
         concepts = state.chapter["concepts"]
-        misconceptions = state.chapter["misconceptions"]
         cases = state.chapter["real_cases"]
+        template = self._animation_template(state)
+        concept = concepts[0] if concepts else state.chapter["title"]
         frames = [
             {
                 "id": "frame_01",
-                "title": f"先看输入：{concepts[0]}",
-                "caption": "动画把训练样本放在左侧，强调模型首先接触的是已知数据。",
-                "focus": concepts[0],
-                "visual": "dataset",
+                "title": "先用生活故事引入",
+                "caption": f"把“{concept}”放进一个真实场景：{cases[0] if cases else '校园学习任务'}。",
+                "focus": concept,
+                "visual": self._visual_for_template(template, 0),
+                "scene_objects": ["生活场景", "学生问题", "AI工具", "要解决的事"],
+                "metric": "先看场景",
+                "takeaway": "先知道它解决什么问题，再学概念。",
             },
             {
                 "id": "frame_02",
-                "title": f"再看目标：{concepts[1]}",
-                "caption": "箭头从训练数据移动到新数据，突出真正要检查的是新场景表现。",
-                "focus": concepts[1],
-                "visual": "generalization",
+                "title": "再看 AI 怎么处理",
+                "caption": "把输入的信息送进 AI，中间会发生匹配、搜索、比较、连接或判断。",
+                "focus": concepts[1] if len(concepts) > 1 else concept,
+                "visual": self._visual_for_template(template, 1),
+                "scene_objects": ["输入信息", "处理过程", "关键线索", "中间结果"],
+                "metric": "看处理过程",
+                "takeaway": "AI不是魔法，它按步骤处理信息。",
             },
             {
                 "id": "frame_03",
-                "title": f"用指标观察：{concepts[2]}",
-                "caption": "损失曲线下降不等于学习完成，要同时观察验证表现。",
-                "focus": concepts[2],
-                "visual": "loss",
+                "title": "然后观察哪里容易错",
+                "caption": "初学者最容易卡住的地方，通常是把表面结果当成真正理解。",
+                "focus": concepts[2] if len(concepts) > 2 else concept,
+                "visual": self._visual_for_template(template, 2),
+                "scene_objects": ["常见误解", "错误信号", "修正方法", "再次检查"],
+                "metric": "看哪里出错",
+                "takeaway": "能发现错误，才是真的开始理解。",
             },
             {
                 "id": "frame_04",
-                "title": f"警惕误区：{concepts[3]}",
-                "caption": misconceptions[1] if len(misconceptions) > 1 else misconceptions[0],
-                "focus": concepts[3],
-                "visual": "overfit",
+                "title": "最后换个新例子试试",
+                "caption": "如果换一个新场景还能讲通，说明你不是只背了定义，而是真的懂了。",
+                "focus": concepts[3] if len(concepts) > 3 else concept,
+                "visual": self._visual_for_template(template, 3),
+                "scene_objects": ["新例子", "迁移使用", "结果检查", "一句话总结"],
+                "metric": "看能否迁移",
+                "takeaway": "学会一个 AI 概念，要能把它用到新例子里。",
             },
         ]
         return json.dumps(
             {
                 "kind": "in_app_animation",
-                "duration_seconds": 32,
-                "playback_note": "这是系统内可播放的动态图解，不是人工录制视频，也不是 mp4 成片。",
-                "scenario": cases[0],
+                "template": template,
+                "topic": state.chapter["title"],
+                "duration_seconds": 36,
+                "playback_note": "这是系统内可播放的初学者动画小课，不是人工录制视频，也不是 mp4 成片。",
+                "scenario": cases[0] if cases else state.chapter["title"],
                 "frames": frames,
-                "teacher_prompt": "播放时引导学生观察：训练表现、泛化表现和常见误区分别在哪里出现。",
+                "teacher_prompt": "播放时只抓一条主线：先用生活故事看懂问题，再看 AI 怎么处理，最后用新例子检查是否真正理解。",
             },
             ensure_ascii=False,
             indent=2,
@@ -1624,15 +1742,21 @@ class AnimationDemoAgent(ResourceAgent):
         fallback = self.content(state)
         prompt = (
             "你是一个教学动画导演和计算机课程教师。请生成一个可在网页前端直接播放的教学动画 JSON，"
-            "用于把抽象概念转成准确、生动、形象的动态讲解。\n\n"
+            "用于把人工智能导论中的任意知识点转成初学者能看懂的动态小课。\n\n"
             "只输出 JSON，不要输出 Markdown，不要包裹代码块。\n"
-            "JSON 必须包含 kind、duration_seconds、playback_note、scenario、frames、teacher_prompt。\n"
-            "frames 是数组，每项包含 id、title、caption、focus、visual；visual 只能从 dataset、generalization、loss、overfit 中选择。\n\n"
+            "JSON 必须包含 kind、template、topic、duration_seconds、playback_note、scenario、frames、teacher_prompt。\n"
+            "template 只能从 flow、compare、network、search、dialogue、risk 中选择。\n"
+            "frames 必须刚好 4 幕，不要多也不要少。\n"
+            "frames 是数组，每项必须包含 id、title、caption、focus、visual、scene_objects、metric、takeaway。"
+            "scene_objects 是 4 个可显示在画面里的中文短标签，必须生活化、可视化，避免堆术语，例如“历史选课记录”“新同学画像”“推荐课程”“是否满意”。"
+            "metric 是当前场景要观察的指标短语，takeaway 是一句初学者能记住的结论。"
+            "caption、takeaway 必须用初中生也能听懂的中文，不要写教材式长段落。\n\n"
             f"课程章节标题：{state.chapter['title']}\n"
             f"核心概念：{state.chapter['concepts']}\n"
             f"详细知识点：{state.chapter['detailed_concepts']}\n"
             f"常见误区：{state.chapter['misconceptions']}\n"
             f"真实案例：{state.chapter['real_cases']}\n"
+            f"学生画像：专业={state.profile.major}，薄弱点={state.profile.weak_points}，偏好={state.profile.preferred_modalities}，目标={state.request.goal}\n"
         )
         content, used_llm, reason = self.use_llm_or_fallback(prompt, fallback)
         if used_llm:
@@ -1640,7 +1764,8 @@ class AnimationDemoAgent(ResourceAgent):
                 parsed = parse_llm_json(content)
                 frames = parsed.get("frames") if isinstance(parsed, dict) else None
                 if isinstance(frames, list) and frames:
-                    return json.dumps(parsed, ensure_ascii=False, indent=2), True, ""
+                    normalized = self._normalize_animation_payload(parsed, state, fallback)
+                    return json.dumps(normalized, ensure_ascii=False, indent=2), True, ""
                 return fallback, False, "LLM returned animation JSON without frames"
             except json.JSONDecodeError as exc:
                 return fallback, False, f"LLM returned invalid animation JSON: {exc}"
@@ -2566,7 +2691,7 @@ class Orchestrator:
             if not agent:
                 continue
 
-            context_summary = f"{request.chapter} / {request.goal}"
+            context_summary = f"{request.chapter} / {request.raw_user_need or request.goal}"
             trace = agent.traced_run(state, context_summary)
 
             if agent_name == "ReviewAgent":

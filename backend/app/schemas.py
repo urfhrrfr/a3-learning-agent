@@ -41,10 +41,13 @@ class ProfileChatResponse(BaseModel):
 
 class GenerateRequest(BaseModel):
     course: str = Field(default="人工智能导论", min_length=1, max_length=80)
-    chapter: str = Field(default="机器学习基础", min_length=1, max_length=80)
+    chapter: str = Field(default="", max_length=80)
     goal: str = Field(default="掌握核心概念并完成练习", min_length=1, max_length=200)
     pain_points: list[str] = Field(default_factory=list, max_length=10)
     resource_types: list[str] = Field(default_factory=list, max_length=12)
+    target_concepts: list[str] = Field(default_factory=list, max_length=12)
+    raw_user_need: str = Field(default="", max_length=1000)
+    chapter_match_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class AgentTrace(BaseModel):

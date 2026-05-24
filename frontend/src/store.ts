@@ -400,14 +400,17 @@ function buildGenerationRequest(options: {
   profile: Profile | null
   resourceTypes: string[]
 }) {
-  const chapter = inferChapter(options.prompt) || options.profile?.current_chapter || '人工智能概述'
+  const chapter = inferChapter(options.prompt) || options.profile?.current_chapter || ''
+  const targetConcepts = inferTargetConcepts(options.prompt)
   const painPoints = inferPainPoints(options.prompt, options.profile?.weak_points || [])
   return {
     course: options.profile?.course || '人工智能导论',
     chapter,
     goal: options.prompt || options.profile?.learning_goal || '掌握核心概念',
     pain_points: painPoints,
-    resource_types: options.resourceTypes
+    resource_types: options.resourceTypes,
+    target_concepts: targetConcepts,
+    raw_user_need: options.prompt
   }
 }
 
@@ -445,4 +448,18 @@ function inferPainPoints(prompt: string, profileWeakPoints: string[]) {
     weakPoints.push('考试复习')
   }
   return weakPoints.slice(0, 10)
+}
+
+function inferTargetConcepts(prompt: string) {
+  const concepts = [
+    '智能体', '图灵测试', '状态空间', '代价函数', 'A*', '启发函数',
+    '命题逻辑', '谓词逻辑', '训练集', '泛化', '损失函数', '过拟合',
+    '分类', '回归', '决策树', '评估指标', '聚类', '降维', 'K-means',
+    '感知机', '反向传播', '激活函数', '梯度下降', '分词', '词向量',
+    '序列建模', '文本分类', '图像特征', '卷积', '目标检测', '数据增强',
+    '状态', '动作', '奖励', '策略', '上下文学习', '提示词', 'RAG', '工具调用',
+    '公平性', '隐私', '可解释性', '安全边界'
+  ]
+  const normalized = prompt.toLowerCase()
+  return concepts.filter(concept => normalized.includes(concept.toLowerCase())).slice(0, 12)
 }

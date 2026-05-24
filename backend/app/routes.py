@@ -286,20 +286,20 @@ def resources_adjust(payload: ResourceAdjustRequest):
 
 
 @router.post("/resources/generate")
-def resources_generate(payload: GenerateRequest):
-    job = state.run_generation(payload)
+def resources_generate(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+    job = state.run_generation(payload, user_id)
     return ok(job.model_dump())
 
 
 @router.post("/resources/generate/background")
-def resources_generate_background(payload: GenerateRequest):
-    job = state.start_generation(payload)
+def resources_generate_background(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+    job = state.start_generation(payload, user_id)
     return ok(job.model_dump())
 
 
 @router.post("/resources/generate/stream")
-def resources_generate_stream(payload: GenerateRequest):
-    job = state.start_generation(payload)
+def resources_generate_stream(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+    job = state.start_generation(payload, user_id)
     
     def generate():
         last_progress = 0

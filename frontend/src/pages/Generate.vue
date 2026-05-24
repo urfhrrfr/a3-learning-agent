@@ -5,6 +5,20 @@
         <span class="eyebrow">生成学习资料</span>
         <h1>告诉我你想学什么</h1>
         <p>输入学习需求后，系统会生成讲解、导图、练习、脚本、代码等多种学习材料。</p>
+        <div class="hero-summary-strip generate-hero-summary" aria-label="学习资料生成摘要">
+          <span>
+            <small>生成状态</small>
+            <strong>{{ inputStateLabel }}</strong>
+          </span>
+          <span>
+            <small>输出形式</small>
+            <strong>{{ outputModeLabel }}</strong>
+          </span>
+          <span>
+            <small>资料包</small>
+            <strong>{{ store.resources.length ? `${store.resources.length} 份` : '待生成' }}</strong>
+          </span>
+        </div>
       </div>
       <div class="generate-hero-visual-card" aria-label="资源生成状态">
         <img class="generate-hero-visual-image" :src="resourceGenerationHero" alt="学习资料生成" />
@@ -254,6 +268,11 @@ const multimodalTypes = ['图文讲解', '思维导图', '互动练习', '拓展
 
 const canSubmit = computed(() => !store.loading && draftPrompt.value.trim().length > 0)
 const primaryActionText = computed(() => store.loading ? '正在生成...' : '开始生成')
+const outputModeLabel = computed(() => {
+  if (outputMode.value === 'lesson') return '讲解优先'
+  if (outputMode.value === 'practice') return '练习优先'
+  return '完整资料包'
+})
 const inputStateLabel = computed(() => {
   if (store.loading) return '生成中'
   if (draftPrompt.value.trim()) return '可提交'

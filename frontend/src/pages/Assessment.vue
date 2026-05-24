@@ -10,6 +10,20 @@
           <span>薄弱点定位</span>
           <span>补救任务</span>
         </div>
+        <div class="hero-summary-strip assessment-hero-summary" aria-label="本次学习结果摘要">
+          <span>
+            <small>当前状态</small>
+            <strong>{{ store.report && !isDemoReport ? `${store.report.score} 分` : '等待提交' }}</strong>
+          </span>
+          <span>
+            <small>主要薄弱点</small>
+            <strong>{{ mainWeakPoint }}</strong>
+          </span>
+          <span>
+            <small>下一步</small>
+            <strong>{{ nextRepairTask }}</strong>
+          </span>
+        </div>
       </div>
       <div class="assessment-hero-visual-card" aria-label="学习结果诊断状态">
         <img class="assessment-hero-visual-image" :src="assessmentResultsHero" alt="学习结果诊断和补救任务的示意图" />
@@ -63,84 +77,86 @@
         @refresh="store.refreshQuiz"
       />
 
-      <section class="panel span-7 assessment-feedback-panel">
-        <div class="panel-title">
-          <div>
-            <h2>本轮评估结论</h2>
-            <p class="muted compact">先看哪里需要补，再按推荐任务继续学。</p>
-          </div>
-        <span v-if="store.report" class="status completed">{{ isDemoReport ? '演示占位' : '已生成' }}</span>
-        </div>
-        <template v-if="store.report">
-          <p v-if="isDemoReport" class="soft-note">
-            当前是默认演示报告，还没有根据你的真实作答评分。提交左侧练习后会生成真实得分、薄弱点和路径调整。
-          </p>
-          <p class="assessment-feedback-text">{{ store.report.feedback }}</p>
-          <div class="report-section">
-            <b>薄弱点</b>
-            <div v-if="store.report.weak_points.length" class="chips">
-              <span class="chip warning" v-for="item in store.report.weak_points" :key="item">{{ item }}</span>
+      <div class="span-7 assessment-side-stack">
+        <section class="panel assessment-feedback-panel">
+          <div class="panel-title">
+            <div>
+              <h2>本轮评估结论</h2>
+              <p class="muted compact">先看哪里需要补，再按推荐任务继续学。</p>
             </div>
-            <p v-else class="muted compact">本次报告未返回结构化薄弱点。</p>
+            <span v-if="store.report" class="status completed">{{ isDemoReport ? '演示占位' : '已生成' }}</span>
           </div>
-          <div class="report-section">
-            <b>下一步怎么补</b>
-            <p class="muted compact">{{ nextRepairDetail }}</p>
-          </div>
-        </template>
-        <div v-else class="empty">
-          <strong>还没有反馈报告</strong>
-          <span>完成左侧练习后，这里会展示评分、薄弱点、错误模式和路径调整建议。</span>
-        </div>
-      </section>
-
-      <details class="system-details span-12">
-        <summary>查看详细分析</summary>
-        <section class="panel user-explain-panel">
-          <div class="explain-grid">
-            <article>
-              <span>错误原因</span>
-              <strong>{{ errorReasonText }}</strong>
-            </article>
-            <article>
-              <span>掌握度变化</span>
-              <strong>{{ masteryDeltaText }}</strong>
-            </article>
-            <article>
-              <span>下一步建议</span>
-              <strong>{{ nextRepairDetail }}</strong>
-            </article>
+          <template v-if="store.report">
+            <p v-if="isDemoReport" class="soft-note">
+              当前是默认演示报告，还没有根据你的真实作答评分。提交左侧练习后会生成真实得分、薄弱点和路径调整。
+            </p>
+            <p class="assessment-feedback-text">{{ store.report.feedback }}</p>
+            <div class="report-section">
+              <b>薄弱点</b>
+              <div v-if="store.report.weak_points.length" class="chips">
+                <span class="chip warning" v-for="item in store.report.weak_points" :key="item">{{ item }}</span>
+              </div>
+              <p v-else class="muted compact">本次报告未返回结构化薄弱点。</p>
+            </div>
+            <div class="report-section">
+              <b>下一步怎么补</b>
+              <p class="muted compact">{{ nextRepairDetail }}</p>
+            </div>
+          </template>
+          <div v-else class="empty compact-assessment-empty">
+            <strong>还没有反馈报告</strong>
+            <span>完成左侧练习后，这里会展示评分、薄弱点、错误模式和路径调整建议。</span>
           </div>
         </section>
-      </details>
 
-      <section class="panel span-12 history-panel">
-        <div class="panel-title">
-          <div>
-            <h2>历史学习结果</h2>
-            <p class="muted compact">本轮评估结论在上方，历史结果按提交时间归档。</p>
+        <details class="system-details assessment-details-panel" open>
+          <summary>查看详细分析</summary>
+          <section class="panel user-explain-panel">
+            <div class="explain-grid assessment-explain-grid">
+              <article>
+                <span>错误原因</span>
+                <strong>{{ errorReasonText }}</strong>
+              </article>
+              <article>
+                <span>掌握度变化</span>
+                <strong>{{ masteryDeltaText }}</strong>
+              </article>
+              <article>
+                <span>下一步建议</span>
+                <strong>{{ nextRepairDetail }}</strong>
+              </article>
+            </div>
+          </section>
+        </details>
+
+        <section class="panel history-panel assessment-history-panel">
+          <div class="panel-title">
+            <div>
+              <h2>历史学习结果</h2>
+              <p class="muted compact">历史结果按提交时间归档。</p>
+            </div>
+            <span class="status pending">{{ historicalReports.length }} 条历史</span>
           </div>
-          <span class="status pending">{{ historicalReports.length }} 条历史</span>
-        </div>
-        <div v-if="historicalReports.length" class="history-record-list">
-          <article v-for="report in historicalReports" :key="report.id" class="history-record">
-            <div class="history-record-head">
-              <div>
-                <strong>{{ report.score }} 分</strong>
-                <small>{{ formatDate(report.created_at) }} · 掌握度变化 {{ formatDelta(report.mastery_delta) }}</small>
+          <div v-if="historicalReports.length" class="history-record-list compact-history-list">
+            <article v-for="report in historicalReports.slice(0, 3)" :key="report.id" class="history-record">
+              <div class="history-record-head">
+                <div>
+                  <strong>{{ report.score }} 分</strong>
+                  <small>{{ formatDate(report.created_at) }} · 掌握度变化 {{ formatDelta(report.mastery_delta) }}</small>
+                </div>
               </div>
-            </div>
-            <p class="muted compact">{{ report.feedback }}</p>
-            <div class="history-chip-row">
-              <span v-for="item in report.weak_points.slice(0, 5)" :key="item">{{ item }}</span>
-            </div>
-          </article>
-        </div>
-        <div v-else class="empty small-empty">
-          <strong>暂无历史结果</strong>
-          <span>完成新的练习评估后，旧结果会自动放入这里。</span>
-        </div>
-      </section>
+              <p class="muted compact">{{ report.feedback }}</p>
+              <div class="history-chip-row">
+                <span v-for="item in report.weak_points.slice(0, 5)" :key="item">{{ item }}</span>
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty small-empty">
+            <strong>暂无历史结果</strong>
+            <span>完成新的练习评估后，旧结果会自动放入这里。</span>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>

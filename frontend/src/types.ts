@@ -132,6 +132,9 @@ export interface GenerateRequest {
   goal?: string
   pain_points?: string[]
   resource_types?: string[]
+  target_concepts?: string[]
+  raw_user_need?: string
+  chapter_match_confidence?: number
 }
 
 export interface PlanDecision {

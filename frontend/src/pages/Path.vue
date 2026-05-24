@@ -5,6 +5,43 @@
         <span class="eyebrow">我的学习任务</span>
         <h1>按顺序完成三步就好</h1>
         <p>先看下一步学什么、练什么、做什么，按顺序完成即可。</p>
+        <div class="path-hero-plan" aria-label="三步学习任务摘要">
+          <article>
+            <span>01</span>
+            <div>
+              <strong>先学什么</strong>
+              <small>{{ firstStepLabel }}</small>
+            </div>
+          </article>
+          <article>
+            <span>02</span>
+            <div>
+              <strong>再做什么</strong>
+              <small>{{ secondStepLabel }}</small>
+            </div>
+          </article>
+          <article>
+            <span>03</span>
+            <div>
+              <strong>最后练什么</strong>
+              <small>{{ thirdStepLabel }}</small>
+            </div>
+          </article>
+        </div>
+        <div class="hero-summary-strip path-hero-summary" aria-label="学习路径状态摘要">
+          <span>
+            <small>阶段</small>
+            <strong>{{ totalSteps ? `${totalSteps} 个` : '待生成' }}</strong>
+          </span>
+          <span>
+            <small>预计用时</small>
+            <strong>{{ totalMinutes ? `${totalMinutes} 分钟` : '待安排' }}</strong>
+          </span>
+          <span>
+            <small>完成度</small>
+            <strong>{{ completionPercent }}%</strong>
+          </span>
+        </div>
       </div>
       <div class="path-hero-visual-card" aria-label="三步学习任务路线">
         <img class="path-hero-visual-image" :src="learningPathHero" alt="按三步完成学习任务的路线示意图" />

@@ -5,6 +5,20 @@
         <span class="eyebrow">我的学习档案</span>
         <h1>先看和我学习有关的事</h1>
         <p>这里展示我的学习目标、薄弱点、学习偏好和系统建议。</p>
+        <div class="hero-summary-strip" aria-label="学习档案摘要">
+          <span>
+            <small>学习目标</small>
+            <strong>{{ store.profile?.learning_goal || '未填写' }}</strong>
+          </span>
+          <span>
+            <small>薄弱点</small>
+            <strong>{{ weakPointText }}</strong>
+          </span>
+          <span>
+            <small>学习偏好</small>
+            <strong>{{ preferenceText }}</strong>
+          </span>
+        </div>
       </div>
       <div class="profile-hero-visual-card" aria-label="学习画像生成个性化建议">
         <img class="profile-hero-visual-image" :src="profileRecommendationHero" alt="学习画像生成个性化建议的示意图" />

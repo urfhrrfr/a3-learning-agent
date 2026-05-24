@@ -11,7 +11,7 @@ os.environ["REDIS_URL"] = ""
 os.environ.setdefault("VECTOR_STORE", "memory")
 
 from app import cache, state, storage
-from app.agents import KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.agents import AnimationDemoAgent, KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
 from app.core.profile_normalizer import ProfileNormalizer
 from app.core.profile_validator import ProfileValidator
 from app.knowledge import COURSE, question_bank
@@ -84,6 +84,30 @@ class ReviewFactCheckLLM(MockLLMProvider):
                 "is_accurate": False,
                 "reasoning": "测试模型认为内容需要复核",
                 "confidence": 0.88,
+            },
+            ensure_ascii=False,
+        )
+
+
+class ShortInvalidAnimationLLM(MockLLMProvider):
+    name = "animation-test"
+
+    def complete(self, prompt: str) -> str:
+        assert "frames 必须刚好 4 幕" in prompt
+        return json.dumps(
+            {
+                "kind": "in_app_animation",
+                "template": "movie",
+                "frames": [
+                    {
+                        "id": "only_one",
+                        "title": "只有一幕",
+                        "caption": "模型返回了不完整脚本",
+                        "focus": "注意力机制",
+                        "visual": "network_nodes",
+                        "scene_objects": ["一句话"],
+                    }
+                ],
             },
             ensure_ascii=False,
         )
@@ -633,6 +657,31 @@ def test_planner_agent_personalizes_resource_mix_by_profile():
     assert workflow_state.plan[0] in {"lecture_doc", "mind_map", "visual_card", "animation_demo", "quiz"}
     assert any(item["reason"] for item in workflow_state.plan_details)
     assert "预计学习" in result["summary"]
+
+
+def test_animation_agent_normalizes_llm_script_to_four_scene_template():
+    profile = Profile(
+        weak_points=["注意力机制"],
+        preferred_modalities=["动画"],
+        updated_at=state.now(),
+    )
+    request = GenerateRequest(
+        chapter="机器学习基础",
+        goal="用动画解释注意力机制",
+        resource_types=["animation_demo"],
+    )
+    workflow_state = WorkflowState("job_animation_template_test", request, profile)
+
+    content, used_llm, reason = AnimationDemoAgent(ShortInvalidAnimationLLM()).generate_content(workflow_state)
+    payload_data = json.loads(content)
+
+    assert used_llm is True
+    assert reason == ""
+    assert payload_data["template"] == "network"
+    assert payload_data["topic"] == workflow_state.chapter["title"]
+    assert len(payload_data["frames"]) == 4
+    assert all(len(frame["scene_objects"]) == 4 for frame in payload_data["frames"])
+    assert all({"title", "caption", "focus", "visual", "metric", "takeaway"} <= set(frame) for frame in payload_data["frames"])
 
 
 def test_orchestrator_respects_planner_selected_resources():
