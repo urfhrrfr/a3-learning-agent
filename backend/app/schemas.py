@@ -41,10 +41,13 @@ class ProfileChatResponse(BaseModel):
 
 class GenerateRequest(BaseModel):
     course: str = Field(default="人工智能导论", min_length=1, max_length=80)
-    chapter: str = Field(default="机器学习基础", min_length=1, max_length=80)
+    chapter: str = Field(default="", max_length=80)
     goal: str = Field(default="掌握核心概念并完成练习", min_length=1, max_length=200)
     pain_points: list[str] = Field(default_factory=list, max_length=10)
     resource_types: list[str] = Field(default_factory=list, max_length=12)
+    target_concepts: list[str] = Field(default_factory=list, max_length=12)
+    raw_user_need: str = Field(default="", max_length=1000)
+    chapter_match_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class AgentTrace(BaseModel):
@@ -85,6 +88,7 @@ class Resource(BaseModel):
     source_refs: list[str] = Field(default_factory=list)
     difficulty: str
     target_profile: list[str]
+    personalized_reason: str = ""
     review_status: Literal["passed", "needs_revision", "blocked"]
     review_reason: str = ""
     audit_reason: str = ""
@@ -125,6 +129,7 @@ class GenerationJob(BaseModel):
     traces: list[AgentTrace] = Field(default_factory=list)
     resources: list[Resource] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    fallback_reason: str = ""
     created_at: str
     completed_at: str | None = None
 

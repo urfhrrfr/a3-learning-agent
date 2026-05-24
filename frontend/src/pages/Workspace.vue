@@ -6,59 +6,85 @@
         <h1>今天先把下一步学扎实</h1>
         <p>{{ todaySummary }}</p>
         <div class="hero-actions">
-          <RouterLink class="btn hero-primary" :to="nextAction.path">开始学习</RouterLink>
+          <RouterLink class="btn hero-primary" to="/profile">先构建画像</RouterLink>
+          <RouterLink class="btn ghost" to="/generate">生成资料</RouterLink>
           <RouterLink class="btn ghost" to="/tutor">问智能导师</RouterLink>
-          <RouterLink class="btn ghost" to="/assessment">做练习</RouterLink>
+        </div>
+        <div class="hero-summary-strip" aria-label="今日学习状态摘要">
+          <span>
+            <small>当前建议</small>
+            <strong>{{ nextAction.title }}</strong>
+          </span>
+          <span>
+            <small>薄弱点</small>
+            <strong>{{ weakPointSummary }}</strong>
+          </span>
+          <span>
+            <small>资料</small>
+            <strong>{{ resourceSummary }}</strong>
+          </span>
         </div>
       </div>
 
-      <div class="today-focus-card">
-        <span>今天该学什么</span>
-        <strong>{{ nextAction.title }}</strong>
-        <p>{{ nextAction.description }}</p>
+      <div class="resource-visual-card" aria-label="资源生成入口">
+        <img class="resource-visual-image" :src="resourceGenerationHero" alt="智能体生成讲义、导图、练习和代码案例的示意图" />
+        <div>
+          <span>今天该学什么</span>
+          <strong>{{ nextAction.title }}</strong>
+          <p>{{ nextAction.description }}</p>
+        </div>
       </div>
     </section>
 
     <div class="grid student-home-grid">
-      <section class="panel span-7 current-task-card">
-        <div class="panel-title">
-          <div>
-            <h2>推荐学习任务</h2>
-            <p class="muted compact">先完成一件最重要的事，学习会轻很多。</p>
+      <section class="panel span-12 home-start-panel">
+        <div class="home-start-main">
+          <span class="eyebrow">推荐学习任务</span>
+          <h2>先完成一件最重要的事</h2>
+          <p>学习会轻很多。系统会根据画像、资源和练习结果，把当前最该做的入口放在这里。</p>
+          <div class="home-action-card">
+            <div>
+              <span>当前建议</span>
+              <strong>{{ nextAction.title }}</strong>
+              <small>{{ nextAction.description }}</small>
+            </div>
+            <RouterLink class="btn hero-primary" :to="nextAction.path">{{ nextAction.label }}</RouterLink>
+          </div>
+          <div class="task-hint">
+            <span>当前薄弱点</span>
+            <strong>{{ weakPointSummary }}</strong>
           </div>
         </div>
-        <h3>{{ nextAction.title }}</h3>
-        <p>{{ nextAction.description }}</p>
-        <div class="task-hint">
-          <span>当前薄弱点</span>
-          <strong>{{ weakPointSummary }}</strong>
-        </div>
-        <RouterLink class="btn hero-primary" :to="nextAction.path">{{ nextAction.label }}</RouterLink>
-      </section>
 
-      <section class="panel span-5 suggestion-card">
-        <div class="panel-title">
-          <div>
-            <h2>快速行动</h2>
-            <p class="muted compact">按今天状态选择一个入口。</p>
+        <div class="home-guide-panel">
+          <div class="panel-title">
+            <div>
+              <h2>使用导航</h2>
+              <p class="muted compact">按这个顺序使用系统，先让系统认识你，再生成和练习。</p>
+            </div>
           </div>
-        </div>
-        <div class="suggestion-list">
-          <RouterLink class="suggestion-item" to="/generate">
-            <span>学习资料</span>
-            <strong>生成或查看适合我的材料</strong>
-            <small>{{ resourceSummary }}</small>
-          </RouterLink>
-          <RouterLink class="suggestion-item" to="/tutor">
-            <span>智能导师</span>
-            <strong>把没懂的问题直接问清楚</strong>
-            <small>{{ store.profile?.current_chapter || '可结合当前画像回答' }}</small>
-          </RouterLink>
-          <RouterLink class="suggestion-item" to="/assessment">
-            <span>练习评估</span>
-            <strong>做几道题，看看哪里还不稳</strong>
-            <small>{{ store.report ? `上次得分 ${store.report.score}` : '完成后会生成反馈' }}</small>
-          </RouterLink>
+          <div class="suggestion-list">
+            <RouterLink class="suggestion-item" to="/profile">
+              <span>01 构建画像</span>
+              <strong>先告诉系统你的基础、目标和困惑</strong>
+              <small>{{ store.profile ? `已建立画像 v${store.profile.version}` : '建议先完成这一步' }}</small>
+            </RouterLink>
+            <RouterLink class="suggestion-item" to="/generate">
+              <span>02 学习资料</span>
+              <strong>生成或查看适合我的材料</strong>
+              <small>{{ resourceSummary }}</small>
+            </RouterLink>
+            <RouterLink class="suggestion-item" to="/tutor">
+              <span>03 智能导师</span>
+              <strong>把没懂的问题直接问清楚</strong>
+              <small>{{ store.profile?.current_chapter || '可结合当前画像回答' }}</small>
+            </RouterLink>
+            <RouterLink class="suggestion-item" to="/assessment">
+              <span>04 练习评估</span>
+              <strong>做几道题，看看哪里还不稳</strong>
+              <small>{{ hasRealAssessment ? `上次得分 ${store.report?.score}` : '完成后会生成反馈' }}</small>
+            </RouterLink>
+          </div>
         </div>
       </section>
 
@@ -112,12 +138,14 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useLearningStore } from '../store'
+import resourceGenerationHero from '../assets/resource-generation-hero.png'
+import { isDemoAssessmentReport, useLearningStore } from '../store'
 import type { Resource } from '../types'
 import ResourceCard from '../components/ResourceCard.vue'
 
 const store = useLearningStore()
 const selected = ref<Resource | null>(null)
+const hasRealAssessment = computed(() => Boolean(store.report && !isDemoAssessmentReport(store.report)))
 
 const loopSteps = computed(() => [
   {
@@ -160,9 +188,9 @@ const loopSteps = computed(() => [
     key: 'assessment',
     index: '05',
     title: '效果评估',
-    description: store.report ? `最近练习得分 ${store.report.score}，路径已反馈调整。` : '练习后形成反馈报告并更新路径。',
+    description: hasRealAssessment.value ? `最近练习得分 ${store.report?.score}，路径已反馈调整。` : '练习后形成反馈报告并更新路径。',
     path: '/assessment',
-    done: Boolean(store.report),
+    done: hasRealAssessment.value,
     label: '做评估'
   }
 ])

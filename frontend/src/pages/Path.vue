@@ -1,17 +1,59 @@
 <template>
   <div class="page path-center-page">
-    <section class="student-hero">
+    <section class="student-hero path-task-hero">
       <div>
         <span class="eyebrow">我的学习任务</span>
         <h1>按顺序完成三步就好</h1>
         <p>先看下一步学什么、练什么、做什么，按顺序完成即可。</p>
+        <div class="path-hero-plan" aria-label="三步学习任务摘要">
+          <article>
+            <span>01</span>
+            <div>
+              <strong>先学什么</strong>
+              <small>{{ firstStepLabel }}</small>
+            </div>
+          </article>
+          <article>
+            <span>02</span>
+            <div>
+              <strong>再做什么</strong>
+              <small>{{ secondStepLabel }}</small>
+            </div>
+          </article>
+          <article>
+            <span>03</span>
+            <div>
+              <strong>最后练什么</strong>
+              <small>{{ thirdStepLabel }}</small>
+            </div>
+          </article>
+        </div>
+        <div class="hero-summary-strip path-hero-summary" aria-label="学习路径状态摘要">
+          <span>
+            <small>阶段</small>
+            <strong>{{ totalSteps ? `${totalSteps} 个` : '待生成' }}</strong>
+          </span>
+          <span>
+            <small>预计用时</small>
+            <strong>{{ totalMinutes ? `${totalMinutes} 分钟` : '待安排' }}</strong>
+          </span>
+          <span>
+            <small>完成度</small>
+            <strong>{{ completionPercent }}%</strong>
+          </span>
+        </div>
       </div>
-      <div class="today-focus-card">
-        <span>路径完成度</span>
-        <strong>{{ completionPercent }}%</strong>
-        <small>{{ completedSteps }}/{{ totalSteps }} 个阶段已完成</small>
-        <div class="home-progress" aria-label="路径完成度">
-          <div :style="{ width: `${completionPercent}%` }"></div>
+      <div class="path-hero-visual-card" aria-label="三步学习任务路线">
+        <img class="path-hero-visual-image" :src="learningPathHero" alt="按三步完成学习任务的路线示意图" />
+        <div class="path-hero-progress">
+          <div>
+            <span>路径完成度</span>
+            <strong>{{ completionPercent }}%</strong>
+            <small>{{ completedSteps }}/{{ totalSteps }} 个阶段已完成</small>
+          </div>
+          <div class="home-progress" aria-label="路径完成度">
+            <div :style="{ width: `${completionPercent}%` }"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -52,7 +94,7 @@
       <section class="panel span-12 path-stage-panel">
         <div class="panel-title">
           <div>
-            <h2>任务清单</h2>
+            <h2>本轮任务清单</h2>
             <p class="muted compact">每一步都包含预计时间和推荐原因。</p>
           </div>
           <button class="btn secondary" :disabled="store.refreshing" @click="store.refresh">
@@ -99,12 +141,40 @@
           </div>
         </section>
       </details>
+
+      <section class="panel span-12 history-panel">
+        <div class="panel-title">
+          <div>
+            <h2>历史学习任务</h2>
+            <p class="muted compact">本轮任务清单在上方，历史路径按生成时间归档。</p>
+          </div>
+          <span class="status pending">{{ historicalPaths.length }} 条历史</span>
+        </div>
+        <div v-if="historicalPaths.length" class="history-record-list">
+          <article v-for="path in historicalPaths" :key="path.id" class="history-record">
+            <div class="history-record-head">
+              <div>
+                <strong>{{ path.steps[0]?.title || '历史学习路径' }}</strong>
+                <small>{{ formatDate(path.updated_at) }} · {{ path.steps.length }} 个任务 · 掌握度 {{ Math.round(path.mastery * 100) }}%</small>
+              </div>
+            </div>
+            <div class="history-chip-row">
+              <span v-for="step in path.steps.slice(0, 4)" :key="step.id">{{ step.title }}</span>
+            </div>
+          </article>
+        </div>
+        <div v-else class="empty small-empty">
+          <strong>暂无历史任务</strong>
+          <span>后续生成新任务后，旧任务会留在这里，便于区分本轮和历史。</span>
+        </div>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import learningPathHero from '../assets/learning-path-hero.png'
 import LearningPathStageCard from '../components/LearningPathStageCard.vue'
 import { useLearningStore } from '../store'
 
@@ -119,5 +189,11 @@ const totalMinutes = computed(() => store.path?.steps.reduce((sum, step) => sum 
 const firstStepLabel = computed(() => store.path?.steps[0]?.title || '先生成学习资料')
 const secondStepLabel = computed(() => store.path?.steps[1]?.title || '按推荐资源学习')
 const thirdStepLabel = computed(() => store.path?.steps[2]?.title || '完成练习并复盘')
+const historicalPaths = computed(() => store.pathHistory.filter(path => !path.is_current))
+
+function formatDate(value?: string | null) {
+  if (!value) return '时间未知'
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
 </script>

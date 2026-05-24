@@ -2,13 +2,16 @@ import json
 import os
 
 from fastapi.testclient import TestClient
-from pathlib import Path
 from uuid import uuid4
 
 os.environ.setdefault("LLM_PROVIDER", "mock")
+os.environ["MYSQL_URL"] = ""
+os.environ["DATABASE_URL"] = ""
+os.environ["REDIS_URL"] = ""
+os.environ.setdefault("VECTOR_STORE", "memory")
 
 from app import cache, state, storage
-from app.agents import KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.agents import AnimationDemoAgent, KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
 from app.core.profile_normalizer import ProfileNormalizer
 from app.core.profile_validator import ProfileValidator
 from app.knowledge import COURSE, question_bank
@@ -86,6 +89,30 @@ class ReviewFactCheckLLM(MockLLMProvider):
         )
 
 
+class ShortInvalidAnimationLLM(MockLLMProvider):
+    name = "animation-test"
+
+    def complete(self, prompt: str) -> str:
+        assert "frames 必须刚好 4 幕" in prompt
+        return json.dumps(
+            {
+                "kind": "in_app_animation",
+                "template": "movie",
+                "frames": [
+                    {
+                        "id": "only_one",
+                        "title": "只有一幕",
+                        "caption": "模型返回了不完整脚本",
+                        "focus": "注意力机制",
+                        "visual": "network_nodes",
+                        "scene_objects": ["一句话"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+
 def payload(response):
     assert response.status_code == 200
     body = response.json()
@@ -158,6 +185,23 @@ JOB_FIELDS = {
     "events",
     "created_at",
     "completed_at",
+}
+
+HISTORY_SUMMARY_FIELDS = {
+    "id",
+    "status",
+    "progress",
+    "current_step",
+    "request",
+    "plan_summary",
+    "fallback_reason",
+    "created_at",
+    "completed_at",
+    "is_current",
+    "resource_count",
+    "resource_type_counts",
+    "trace_count",
+    "event_count",
 }
 
 PATH_FIELDS = {
@@ -271,6 +315,79 @@ def test_tutor_learning_loop_generates_exercise_and_updates_mastery():
     assert result["next_step"]["title"]
 
 
+def test_tutor_chat_uses_rag_evidence_without_generated_resources():
+    original_resources = state.resources
+    headers = {"X-User-Id": f"tutor-rag-{uuid4().hex[:8]}"}
+    try:
+        state.resources = []
+        payload(client.post("/api/profile/chat", json={"message": "我喜欢代码案例，过拟合和泛化容易混淆"}, headers=headers))
+
+        tutor = payload(
+            client.post(
+                "/api/tutor/chat",
+                json={"question": "为什么训练集表现很好，测试集效果可能很差？"},
+                headers=headers,
+            )
+        )
+
+        assert tutor["source_refs"]
+        assert tutor["evidence_sources"]
+        assert tutor["cited_resources"] == []
+        assert all(source["text"] for source in tutor["evidence_sources"])
+        assert set(tutor["source_refs"]) >= {source["id"] for source in tutor["evidence_sources"]}
+        assert tutor["retrieval_warnings"] == []
+        assert any("vector" in source.get("retrieval_channels", []) for source in tutor["evidence_sources"])
+    finally:
+        state.resources = original_resources
+
+
+def test_retrieval_logs_persist_generation_and_tutor_evidence(monkeypatch, tmp_path):
+    original_resources = state.resources
+    test_db = tmp_path / f"test_retrieval_logs_{uuid4().hex}.db"
+    monkeypatch.setattr(storage, "DB_PATH", test_db)
+    try:
+        state.resources = []
+        workflow = WorkflowState(
+            "job_retrieval_log_test",
+            GenerateRequest(chapter="机器学习基础", goal="理解过拟合", pain_points=["泛化混淆"]),
+            Profile(updated_at=state.now(), weak_points=["过拟合"], preferred_modalities=["代码案例"]),
+        )
+
+        KnowledgeAgent(MockLLMProvider()).run(workflow)
+
+        generation_logs = storage.load_records("retrieval_log")
+        assert len(generation_logs) == 1
+        assert generation_logs[0]["scenario"] == "resource_generation"
+        assert generation_logs[0]["job_id"] == "job_retrieval_log_test"
+        assert generation_logs[0]["selected_sources"]
+        assert generation_logs[0]["selected_source_ids"]
+
+        headers = {"X-User-Id": f"retrieval-log-user-{uuid4().hex[:8]}"}
+        tutor = payload(
+            client.post(
+                "/api/tutor/chat",
+                json={"question": "为什么训练集很好但测试集很差？"},
+                headers=headers,
+            )
+        )
+        assert tutor["evidence_sources"]
+
+        logs = payload(client.get("/api/retrieval/logs?limit=10"))
+        scenarios = {item["scenario"] for item in logs}
+        assert {"resource_generation", "tutor_chat"} <= scenarios
+        tutor_log = next(item for item in logs if item["scenario"] == "tutor_chat")
+        assert tutor_log["user_id"] == headers["X-User-Id"]
+        assert tutor_log["query"] == "为什么训练集很好但测试集很差？"
+        assert tutor_log["selected_sources"]
+    finally:
+        state.resources = original_resources
+        if test_db.exists():
+            try:
+                test_db.unlink()
+            except PermissionError:
+                pass
+
+
 def test_profile_normalizer_static_aliases_and_injection():
     normalizer = ProfileNormalizer({"高数": "高等数学", "python基础": "Python", "代码": "代码案例"})
 
@@ -342,9 +459,9 @@ def test_profile_validator_detects_unknown_tags_and_bad_mastery():
     assert any("mastery 应为 0-1" in warning for warning in result["warnings"])
 
 
-def test_profile_versions_return_persisted_snapshots(monkeypatch):
+def test_profile_versions_return_persisted_snapshots(monkeypatch, tmp_path):
     original_profile = state.profile
-    test_db = Path(__file__).resolve().parents[1] / "data" / f"test_profile_versions_{uuid4().hex}.db"
+    test_db = tmp_path / f"test_profile_versions_{uuid4().hex}.db"
     monkeypatch.setattr(storage, "DB_PATH", test_db)
     try:
         state.profile = state.Profile(updated_at=state.now())
@@ -374,10 +491,10 @@ def test_profile_versions_return_persisted_snapshots(monkeypatch):
                 pass
 
 
-def test_profile_endpoints_are_isolated_by_user_id(monkeypatch):
+def test_profile_endpoints_are_isolated_by_user_id(monkeypatch, tmp_path):
     original_profile = state.profile
     original_profiles = dict(state.profiles)
-    test_db = Path(__file__).resolve().parents[1] / "data" / f"test_profile_users_{uuid4().hex}.db"
+    test_db = tmp_path / f"test_profile_users_{uuid4().hex}.db"
     monkeypatch.setattr(storage, "DB_PATH", test_db)
     try:
         state.profile = state.Profile(updated_at=state.now())
@@ -542,6 +659,31 @@ def test_planner_agent_personalizes_resource_mix_by_profile():
     assert "预计学习" in result["summary"]
 
 
+def test_animation_agent_normalizes_llm_script_to_four_scene_template():
+    profile = Profile(
+        weak_points=["注意力机制"],
+        preferred_modalities=["动画"],
+        updated_at=state.now(),
+    )
+    request = GenerateRequest(
+        chapter="机器学习基础",
+        goal="用动画解释注意力机制",
+        resource_types=["animation_demo"],
+    )
+    workflow_state = WorkflowState("job_animation_template_test", request, profile)
+
+    content, used_llm, reason = AnimationDemoAgent(ShortInvalidAnimationLLM()).generate_content(workflow_state)
+    payload_data = json.loads(content)
+
+    assert used_llm is True
+    assert reason == ""
+    assert payload_data["template"] == "network"
+    assert payload_data["topic"] == workflow_state.chapter["title"]
+    assert len(payload_data["frames"]) == 4
+    assert all(len(frame["scene_objects"]) == 4 for frame in payload_data["frames"])
+    assert all({"title", "caption", "focus", "visual", "metric", "takeaway"} <= set(frame) for frame in payload_data["frames"])
+
+
 def test_orchestrator_respects_planner_selected_resources():
     profile = state.Profile(
         mastery=0.24,
@@ -589,6 +731,7 @@ def test_knowledge_agent_reranks_sources_with_profile_context():
     assert 3 <= len(workflow_state.sources) <= 5
     assert all({"id", "text", "relevance_score"} <= set(item) for item in workflow_state.sources)
     assert all(0 <= item["relevance_score"] <= 1 for item in workflow_state.sources)
+    assert all("retrieval_channels" in item for item in workflow_state.sources)
     assert any("过拟合" in item["text"] or "泛化" in item["text"] for item in workflow_state.sources)
 
 
@@ -676,10 +819,69 @@ def test_learning_path_api_exposes_specific_reasons_and_resource_ids(monkeypatch
         state.assessment_report = original_assessment
 
 
+def test_current_learning_path_repairs_stale_resource_references():
+    original_profile = state.profile
+    original_resources = state.resources
+    original_path = state.learning_path
+    original_assessment = state.assessment_report
+    try:
+        state.profile = state.Profile(updated_at=state.now())
+        state.resources = [
+            Resource(
+                id="res_current",
+                type="lecture_doc",
+                title="Current resource",
+                content_format="markdown",
+                content="Demo content",
+                source_refs=["demo#objectives"],
+                difficulty="入门",
+                target_profile=["demo"],
+                review_status="passed",
+                created_by_agents=["TestAgent"],
+                created_at=state.now(),
+            )
+        ]
+        state.learning_path = state.LearningPath(
+            id="path_stale",
+            profile_version=1,
+            mastery=0.2,
+            adjustment_reason="stale path",
+            updated_at=state.now(),
+            steps=[
+                state.LearningPathStep(
+                    id="step_01",
+                    title="Stale",
+                    objective="References an old resource",
+                    recommended_resource_ids=["res_missing"],
+                    reason="stale",
+                    estimated_minutes=10,
+                )
+            ],
+        )
+        state.assessment_report = None
+
+        repaired = payload(client.get("/api/learning-path/current"))
+        valid_ids = {resource.id for resource in state.resources}
+        referenced_ids = [
+            resource_id
+            for step in repaired["steps"]
+            for resource_id in step["recommended_resource_ids"]
+        ]
+
+        assert referenced_ids
+        assert all(resource_id in valid_ids for resource_id in referenced_ids)
+    finally:
+        state.profile = original_profile
+        state.resources = original_resources
+        state.learning_path = original_path
+        state.assessment_report = original_assessment
+
+
 def test_api_contract_endpoints_return_documented_shapes():
     health = payload(client.get("/api/health"))
-    assert_fields(health, {"status", "mock_llm", "course"})
+    assert_fields(health, {"status", "mock_llm", "course", "vector_store"})
     assert health["llm_provider"] == "mock"
+    assert_fields(health["vector_store"], {"requested", "active", "fallback", "collection"})
 
     profile = payload(client.get("/api/profile/current"))
     assert_fields(profile, PROFILE_FIELDS)
@@ -710,6 +912,24 @@ def test_api_contract_endpoints_return_documented_shapes():
     fetched_job = payload(client.get(f"/api/jobs/{job['id']}"))
     assert_fields(fetched_job, JOB_FIELDS)
     assert fetched_job["id"] == job["id"]
+
+    history = payload(client.get("/api/resources/history"))
+    assert isinstance(history, list)
+    assert history
+    history_summary = next(item for item in history if item["id"] == job["id"])
+    assert_fields(history_summary, HISTORY_SUMMARY_FIELDS)
+    assert "resources" not in history_summary
+    assert "traces" not in history_summary
+    assert "events" not in history_summary
+    assert history_summary["resource_count"] == len(job["resources"])
+    assert history_summary["resource_type_counts"]
+
+    history_detail = payload(client.get(f"/api/resources/history/{job['id']}"))
+    assert_fields(history_detail, JOB_FIELDS | {"is_current"})
+    assert history_detail["id"] == job["id"]
+    assert history_detail["resources"]
+    assert isinstance(history_detail["traces"], list)
+    assert isinstance(history_detail["events"], list)
 
     resources = payload(client.get("/api/resources"))
     assert isinstance(resources, list)
@@ -751,6 +971,10 @@ def test_error_responses_use_api_envelope():
     assert job_error["code"] == "JOB_NOT_FOUND"
     assert job_error["message"] == "job not found"
 
+    history_job_error = error_payload(client.get("/api/resources/history/not_found"), 404)
+    assert history_job_error["code"] == "JOB_NOT_FOUND"
+    assert history_job_error["message"] == "history job not found"
+
     resource_error = error_payload(client.get("/api/resources/not_found"), 404)
     assert resource_error["code"] == "RESOURCE_NOT_FOUND"
     assert resource_error["message"] == "resource not found"
@@ -765,14 +989,14 @@ def test_error_responses_use_api_envelope():
     assert empty_quiz_error["code"] == "VALIDATION_ERROR"
 
 
-def test_hydrate_from_db_restores_persisted_demo_state(monkeypatch):
+def test_hydrate_from_db_restores_persisted_demo_state(monkeypatch, tmp_path):
     original_profile = state.profile
     original_jobs = state.jobs
     original_resources = state.resources
     original_path = state.learning_path
     original_assessment = state.assessment_report
 
-    test_db = Path(__file__).resolve().parents[1] / "data" / f"test_app_hydrate_{uuid4().hex}.db"
+    test_db = tmp_path / f"test_app_hydrate_{uuid4().hex}.db"
     monkeypatch.setattr(storage, "DB_PATH", test_db)
     try:
         state.profile = state.Profile(updated_at=state.now())
@@ -997,6 +1221,31 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
             created_at=state.now(),
         ),
         Resource(
+            id="res_unsupported_inline_context",
+            type="lecture_doc",
+            title="引用附近缺少证据支撑",
+            content_format="markdown",
+            content=(
+                "训练集、泛化、过拟合属于机器学习基础，学习时需要区分训练表现和测试表现。"
+                "下面这段故意偏离证据：火星矿石会自动预测彩票号码，并且可以让所有模型无需数据就得到满分。"
+                "这种说法和课程证据没有可验证关系，只是为了测试引用窗口。"
+                f"[来源: {chapter_id}#detailed_concepts:01]"
+            ),
+            evidence_sources=[
+                {
+                    "id": f"{chapter_id}#detailed_concepts:01",
+                    "text": "训练集、泛化、损失函数和过拟合是机器学习基础中的关键概念。",
+                    "relevance_score": 0.93,
+                    "reason": "覆盖核心概念。",
+                }
+            ],
+            difficulty="入门",
+            target_profile=["例子驱动"],
+            review_status="needs_revision",
+            created_by_agents=["LectureAgent"],
+            created_at=state.now(),
+        ),
+        Resource(
             id="res_blocked",
             type="lecture_doc",
             title="风险内容",
@@ -1037,6 +1286,9 @@ def test_review_agent_marks_passed_needs_revision_and_blocked():
 
     assert resources["res_unknown_inline_ref"].review_status == "needs_revision"
     assert "无法映射的正文引用" in "；".join(resources["res_unknown_inline_ref"].review_notes)
+
+    assert resources["res_unsupported_inline_context"].review_status == "needs_revision"
+    assert "引用附近缺少对应证据支撑" in "；".join(resources["res_unsupported_inline_context"].review_notes)
 
     assert resources["res_blocked"].review_status == "blocked"
     assert resources["res_blocked"].review_confidence == 0.35

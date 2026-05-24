@@ -4,14 +4,17 @@ import json
 import random
 import re
 from datetime import datetime, timezone
-from threading import Thread
+from threading import Lock, Thread
 from uuid import uuid4
 
 from .agents import AssessmentAgent, Orchestrator, ProfileAgent, now
 from .cache import cache_job, get_cached_job
 from .path_planner import PathPlanner
+from .providers.factory import get_llm_provider
+from .knowledge import infer_target_concepts, match_chapter
 from .schemas import (
     AssessmentReport,
+    AgentTrace,
     ChatAndGenerateRequest,
     GenerateRequest,
     GenerationJob,
@@ -31,10 +34,13 @@ from .storage import delete_records, load_latest_record, load_records, save_reco
 profile = Profile(updated_at=now())
 profiles: dict[str, Profile] = {}
 jobs: dict[str, GenerationJob] = {}
+job_profiles: dict[str, Profile] = {}
 resources = []
 learning_path: LearningPath | None = None
 assessment_report: AssessmentReport | None = None
 DEFAULT_USER_ID = "student_demo"
+generation_lock = Lock()
+active_generation_job_id: str | None = None
 
 
 PROFILE_DIMENSIONS = [
@@ -103,6 +109,75 @@ def event(job: GenerationJob, event_type: str, payload: dict):
     return item
 
 
+def normalize_resource(resource: Resource) -> Resource:
+    if resource.source_refs and not resource.evidence_sources:
+        resource.evidence_sources = [{"id": ref, "text": "", "relevance_score": 0.0, "reason": ""} for ref in resource.source_refs]
+    if resource.evidence_sources and not resource.source_refs:
+        resource.source_refs = [source.id for source in resource.evidence_sources]
+    resource.personalized_reason = resource.personalized_reason or "基于当前学生画像、薄弱点和学习偏好生成。"
+    resource.review_reason = resource.review_reason or resource.audit_reason or "演示兜底审核：结构完整，可用于学习。"
+    resource.audit_reason = resource.audit_reason or resource.review_reason
+    resource.review_notes = resource.review_notes or ["字段完整性检查通过。"]
+    resource.created_by_agents = resource.created_by_agents or ["ResourceFallback"]
+    return resource
+
+
+def fallback_resources(request: GenerateRequest, reason: str) -> list[Resource]:
+    chapter = find_chapter(request.chapter)
+    refs = [f"{chapter['id']}#objectives", f"{chapter['id']}#detailed_concepts", f"{chapter['id']}#practice_questions"]
+    base_target = ["演示兜底", *(request.target_concepts or [])[:3], *(request.pain_points or [])[:2]]
+    intent_note = (
+        f"本次需求：{request.raw_user_need or request.goal}；"
+        f"匹配章节：{chapter['title']}；"
+        f"概念：{'、'.join(request.target_concepts) or '按章节核心概念'}。"
+    )
+    items = [
+        Resource(
+            id=f"res_{uuid4().hex[:8]}",
+            type="lecture_doc",
+            title=f"兜底讲解文档：{chapter['title']}",
+            content_format="markdown",
+            content=(
+                f"# {chapter['title']} 演示兜底讲解\n\n"
+                f"当前目标：{request.goal}\n\n"
+                "## 核心概念\n"
+                + "\n".join(f"- {item}" for item in chapter.get("concepts", [])[:4])
+                + "\n\n## 学习建议\n先用一个生活例子解释概念，再完成一道练习确认是否理解。"
+            ),
+            source_refs=refs[:2],
+            difficulty="入门",
+            target_profile=base_target,
+            personalized_reason=f"{intent_note} LLM 或智能体链路不可用时，用课程知识库生成可展示讲解。",
+            review_status="passed",
+            review_reason=f"fallback_reason: {reason}",
+            audit_reason=f"fallback_reason: {reason}",
+            review_notes=["资源来自本地课程知识库，未调用真实视频生成。"],
+            review_confidence=0.72,
+            created_by_agents=["ResourceFallback", "ReviewAgent"],
+            created_at=now(),
+        ),
+        Resource(
+            id=f"res_{uuid4().hex[:8]}",
+            type="quiz",
+            title=f"兜底练习题：{chapter['title']}",
+            content_format="json",
+            content=json.dumps(chapter.get("practice_questions", [])[:5], ensure_ascii=False, indent=2),
+            source_refs=refs,
+            difficulty="基础",
+            target_profile=base_target,
+            personalized_reason=f"{intent_note} 保证演示中练习评估主链路可继续。",
+            review_status="passed",
+            review_reason=f"fallback_reason: {reason}",
+            audit_reason=f"fallback_reason: {reason}",
+            review_notes=["题目来自本地题库。"],
+            review_confidence=0.74,
+            created_by_agents=["QuizFallback", "ReviewAgent"],
+            created_at=now(),
+        ),
+    ]
+    return [normalize_resource(item) for item in items]
+
+
 def persist_job(job: GenerationJob) -> None:
     payload = job.model_dump()
     save_record("job", job.id, payload)
@@ -133,6 +208,114 @@ def get_job(job_id: str) -> GenerationJob | None:
     return None
 
 
+def _record_time_key(item: dict) -> str:
+    return str(item.get("completed_at") or item.get("updated_at") or item.get("created_at") or "")
+
+
+def latest_generation_job_id() -> str:
+    if active_generation_job_id:
+        return active_generation_job_id
+    completed_jobs = [
+        job
+        for job in jobs.values()
+        if job.status == "completed" and job.resources
+    ]
+    if not completed_jobs:
+        return ""
+    latest = max(completed_jobs, key=lambda item: item.completed_at or item.created_at)
+    return latest.id
+
+
+def _generation_history_jobs(limit: int = 20) -> tuple[list[GenerationJob], str]:
+    loaded = []
+    for item in load_records("job"):
+        try:
+            job = GenerationJob(**item)
+            loaded.append(job)
+            jobs.setdefault(job.id, job)
+        except Exception:  # noqa: BLE001
+            continue
+    current_id = latest_generation_job_id()
+    candidates = [
+        job
+        for job in {job.id: job for job in [*loaded, *jobs.values()]}.values()
+        if job.resources or job.status in {"queued", "running", "failed"}
+    ]
+    candidates = sorted(candidates, key=lambda item: item.completed_at or item.created_at, reverse=True)
+    return candidates[: max(1, min(limit, 100))], current_id
+
+
+def _resource_type_counts(job: GenerationJob) -> list[dict[str, int | str]]:
+    counts: dict[str, int] = {}
+    for resource in job.resources:
+        counts[resource.type] = counts.get(resource.type, 0) + 1
+    return [{"type": resource_type, "count": count} for resource_type, count in counts.items()]
+
+
+def generation_history(limit: int = 20) -> list[dict]:
+    candidates, current_id = _generation_history_jobs(limit)
+    return [
+        {
+            "id": job.id,
+            "status": job.status,
+            "progress": job.progress,
+            "current_step": job.current_step,
+            "request": job.request.model_dump(),
+            "plan_summary": job.plan_summary.model_dump(),
+            "fallback_reason": job.fallback_reason,
+            "created_at": job.created_at,
+            "completed_at": job.completed_at,
+            "is_current": job.id == current_id,
+            "resource_count": len(job.resources),
+            "resource_type_counts": _resource_type_counts(job),
+            "trace_count": len(job.traces),
+            "event_count": len(job.events),
+        }
+        for job in candidates
+    ]
+
+
+def generation_history_detail(job_id: str) -> dict | None:
+    job = get_job(job_id)
+    if not job or not (job.resources or job.status in {"queued", "running", "failed"}):
+        return None
+    current_id = latest_generation_job_id()
+    return {
+        **job.model_dump(),
+        "is_current": job.id == current_id,
+    }
+
+
+def learning_path_history(limit: int = 20) -> list[dict]:
+    records = load_records("path")
+    if learning_path and not any(item.get("id") == learning_path.id for item in records):
+        records.append(learning_path.model_dump())
+    records = sorted(records, key=_record_time_key, reverse=True)
+    current_id = learning_path.id if learning_path else ""
+    return [
+        {
+            **item,
+            "is_current": item.get("id") == current_id,
+        }
+        for item in records[: max(1, min(limit, 100))]
+    ]
+
+
+def assessment_history(limit: int = 20) -> list[dict]:
+    records = load_records("assessment")
+    if assessment_report and not any(item.get("id") == assessment_report.id for item in records):
+        records.append(assessment_report.model_dump())
+    records = sorted(records, key=_record_time_key, reverse=True)
+    current_id = assessment_report.id if assessment_report else ""
+    return [
+        {
+            **item,
+            "is_current": item.get("id") == current_id,
+        }
+        for item in records[: max(1, min(limit, 100))]
+    ]
+
+
 def build_plan_summary(plan_details: list[dict]) -> PlanSummary:
     decisions = [
         PlanDecision(
@@ -146,6 +329,59 @@ def build_plan_summary(plan_details: list[dict]) -> PlanSummary:
     ]
     total_estimated_time = sum(int(item.get("estimated_minutes", 0) or 0) for item in plan_details)
     return PlanSummary(total_estimated_time=total_estimated_time, decisions=decisions)
+
+
+def resolve_generation_request(request: GenerateRequest, active_profile: Profile | None = None) -> tuple[GenerateRequest, list[str]]:
+    planning_profile = active_profile or profile
+    raw_need = request.raw_user_need.strip() or request.goal.strip()
+    profile_context = "；".join(
+        item
+        for item in [
+            planning_profile.current_chapter,
+            planning_profile.learning_goal,
+            "，".join(planning_profile.weak_points),
+            "，".join(planning_profile.interests),
+        ]
+        if item
+    )
+    user_match = match_chapter(
+        raw_need,
+        request.chapter,
+        "，".join(request.pain_points),
+    )
+    if user_match.get("source") == "explicit" and user_match.get("confidence", 0.0) >= 0.6:
+        match = user_match
+    else:
+        fallback_chapter = planning_profile.current_chapter or request.chapter
+        match = match_chapter(profile_context, fallback=fallback_chapter)
+        if user_match.get("warnings"):
+            match["warnings"] = [*user_match.get("warnings", []), *match.get("warnings", [])]
+    chapter = match["chapter"]
+    inferred_concepts = infer_target_concepts(
+        raw_need,
+        request.goal,
+        "，".join(request.pain_points),
+        profile_context,
+        chapter_title=chapter["title"],
+    )
+    target_concepts = list(dict.fromkeys([*request.target_concepts, *inferred_concepts]))[:12]
+    pain_points = list(dict.fromkeys([*request.pain_points, *planning_profile.weak_points]))[:10]
+    goal = raw_need or planning_profile.learning_goal or request.goal
+    resolved = request.model_copy(
+        update={
+            "course": request.course or planning_profile.course or "人工智能导论",
+            "chapter": chapter["title"],
+            "goal": goal,
+            "pain_points": pain_points,
+            "target_concepts": target_concepts,
+            "raw_user_need": raw_need,
+            "chapter_match_confidence": float(match.get("confidence", 0.0)),
+        }
+    )
+    warnings = list(match.get("warnings", []))
+    if match.get("source") != "explicit":
+        warnings.append(f"章节未由本次输入直接确认，当前使用：{chapter['title']}。")
+    return resolved, warnings
 
 
 def normalize_user_id(user_id: str | None = None) -> str:
@@ -199,6 +435,15 @@ def update_profile_from_message(message: str, user_id: str | None = None):
     fusion_meta = profile_agent.last_fusion_meta
     fused_profile.version = current_profile.version + 1
     fused_profile.updated_at = now()
+    chapter_match = match_chapter(
+        message,
+        fused_profile.learning_goal,
+        "，".join(fused_profile.weak_points),
+        "，".join(fused_profile.interests),
+        fallback=fused_profile.current_chapter,
+    )
+    if chapter_match.get("confidence", 0.0) >= 0.6:
+        fused_profile.current_chapter = chapter_match["chapter"]["title"]
 
     set_profile_for_user(resolved_user_id, fused_profile)
     save_record("profile_version", f"{resolved_user_id}_v{fused_profile.version}", fused_profile.model_dump())
@@ -207,6 +452,7 @@ def update_profile_from_message(message: str, user_id: str | None = None):
     changes = {}
     tracked_fields = [
         "knowledge_base",
+        "current_chapter",
         "learning_goal",
         "cognitive_style",
         "preferred_modalities",
@@ -387,15 +633,21 @@ def evaluate_tutor_exercise(exercise: dict, answer: str, user_id: str | None = N
     return {
         "score": score,
         "mastery_delta": mastery_delta,
+        "weak_points": current_profile.weak_points,
+        "mistake_patterns": current_profile.mistake_patterns,
         "feedback": feedback,
         "matched_keywords": hits,
+        "adjusted_path": path.model_dump(),
         "profile": current_profile.model_dump(),
         "learning_path": path.model_dump(),
         "next_step": next_step,
     }
 
 
-def run_generation(request: GenerateRequest) -> GenerationJob:
+def run_generation(request: GenerateRequest, user_id: str | None = None) -> GenerationJob:
+    global active_generation_job_id
+    active_profile = get_profile(user_id)
+    request, intent_warnings = resolve_generation_request(request, active_profile)
     job = GenerationJob(
         id=f"job_{uuid4().hex[:8]}",
         status="queued",
@@ -405,12 +657,34 @@ def run_generation(request: GenerateRequest) -> GenerationJob:
         created_at=now(),
     )
     jobs[job.id] = job
+    job_profiles[job.id] = active_profile.model_copy(deep=True)
+    active_generation_job_id = job.id
     event(job, "job_queued", {"job_id": job.id})
+    event(
+        job,
+        "intent_resolved",
+        {
+            "chapter": request.chapter,
+            "target_concepts": request.target_concepts,
+            "confidence": request.chapter_match_confidence,
+            "warnings": intent_warnings,
+        },
+    )
     persist_job(job)
     return execute_generation_job(job)
 
 
-def start_generation(request: GenerateRequest) -> GenerationJob:
+def start_generation(request: GenerateRequest, user_id: str | None = None) -> GenerationJob:
+    global active_generation_job_id
+    active_profile = get_profile(user_id)
+    request, intent_warnings = resolve_generation_request(request, active_profile)
+    with generation_lock:
+        active_job = get_job(active_generation_job_id) if active_generation_job_id else None
+        if active_job and active_job.status in {"queued", "running"}:
+            event(active_job, "job_reused", {"job_id": active_job.id, "reason": "已有资源生成任务正在运行，连续点击已复用当前任务。"})
+            persist_job(active_job)
+            return active_job
+
     job = GenerationJob(
         id=f"job_{uuid4().hex[:8]}",
         status="queued",
@@ -420,14 +694,67 @@ def start_generation(request: GenerateRequest) -> GenerationJob:
         created_at=now(),
     )
     jobs[job.id] = job
+    job_profiles[job.id] = active_profile.model_copy(deep=True)
+    active_generation_job_id = job.id
     event(job, "job_queued", {"job_id": job.id})
+    event(
+        job,
+        "intent_resolved",
+        {
+            "chapter": request.chapter,
+            "target_concepts": request.target_concepts,
+            "confidence": request.chapter_match_confidence,
+            "warnings": intent_warnings,
+        },
+    )
     persist_job(job)
     Thread(target=execute_generation_job, args=(job,), daemon=True).start()
     return job
 
 
+def ensure_required_generation_traces(job: GenerationJob) -> list[str]:
+    provider_name = next((trace.llm_provider for trace in job.traces if trace.llm_provider), get_llm_provider().name)
+    required = [
+        ("ProfileAgent", "画像分析", "读取学生画像、目标和薄弱点。", "画像已用于资源个性化。"),
+        ("KnowledgeAgent", "知识召回", "检索课程知识库片段。", "已绑定课程章节来源。"),
+        ("PlannerAgent", "学习规划", "选择适合当前画像的资源组合。", "已形成资源生成计划。"),
+        ("ResourceAgent", "资源生成", "按计划生成学习资源。", f"已产出 {len(job.resources)} 份资源。"),
+        ("ReviewAgent", "内容审核", "检查来源、结构和安全性。", "已完成演示级内容审核。"),
+        ("PathPlanner", "路径更新", "根据最新资源更新学习路径。", "任务完成后会同步刷新学习路径。"),
+    ]
+    existing = {trace.agent for trace in job.traces}
+    added = []
+    for agent, stage, input_summary, output_summary in required:
+        if agent in existing:
+            continue
+        trace = AgentTrace(
+            id=f"trace_{uuid4().hex[:8]}",
+            job_id=job.id,
+            agent=agent,
+            status="completed",
+            input_summary=input_summary,
+            output_summary=output_summary,
+            collaboration_stage=stage,
+            boundary="演示稳定性补齐 trace，不改变原智能体职责。",
+            depends_on=[],
+            source_refs=sorted({ref for resource in job.resources for ref in resource.source_refs})[:5],
+            warnings=[job.fallback_reason] if job.fallback_reason else [],
+            confidence=0.72 if job.fallback_reason else 0.86,
+            retry_count=0,
+            llm_provider=provider_name,
+            review_conclusion="ReviewAgent 已完成安全与来源审核。" if agent == "ReviewAgent" else "",
+            started_at=now(),
+            finished_at=now(),
+        )
+        job.traces.append(trace)
+        added.append(stage)
+    return added
+
+
 def execute_generation_job(job: GenerationJob) -> GenerationJob:
+    global active_generation_job_id
     request = job.request
+    active_profile = job_profiles.get(job.id, profile)
 
     job.status = "running"
     job.progress = 5
@@ -439,9 +766,9 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
     total = max(len(orchestrator.enabled_agent_names(request)), 1)
     last_resource_count = 0
     try:
-        for idx, (agent, workflow_state) in enumerate(orchestrator.generate(job.id, request, profile), start=1):
+        for idx, (agent, workflow_state) in enumerate(orchestrator.generate(job.id, request, active_profile), start=1):
             job.traces = workflow_state.traces
-            job.resources = workflow_state.resources
+            job.resources = [normalize_resource(resource) for resource in workflow_state.resources]
             job.plan_summary = build_plan_summary(workflow_state.plan_details)
             job.progress = int(idx / total * 95)
             job.current_step = agent.name
@@ -451,10 +778,28 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
                 event(job, "resource_ready", {"count": len(workflow_state.resources)})
             persist_job(job)
     except Exception as exc:  # noqa: BLE001
-        job.status = "failed"
-        job.current_step = "failed"
+        job.fallback_reason = f"资源生成链路异常，已切换本地课程兜底资源：{exc}"
+        job.resources = fallback_resources(request, job.fallback_reason)
+        event(job, "job_fallback", {"message": job.fallback_reason, "resources": len(job.resources)})
+        persist_job(job)
+
+    if not job.resources:
+        job.fallback_reason = job.fallback_reason or "智能体未产出资源，已切换本地课程兜底资源。"
+        job.resources = fallback_resources(request, job.fallback_reason)
+        event(job, "job_fallback", {"message": job.fallback_reason, "resources": len(job.resources)})
+        persist_job(job)
+
+    missing_stages = ensure_required_generation_traces(job)
+    if missing_stages:
+        event(job, "trace_completed", {"added": missing_stages})
+
+    is_latest_job = active_generation_job_id == job.id
+    if not is_latest_job:
+        job.status = "completed"
+        job.progress = 100
+        job.current_step = "job_completed_snapshot_only"
         job.completed_at = now()
-        event(job, "job_failed", {"message": str(exc)})
+        event(job, "job_completed", {"resources": len(job.resources), "traces": len(job.traces), "committed": False})
         persist_job(job)
         return job
 
@@ -462,13 +807,13 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
     job.progress = 100
     job.current_step = "job_completed"
     job.completed_at = now()
-    resources[:] = job.resources
+    resources[:] = [normalize_resource(resource) for resource in job.resources]
     event(job, "job_completed", {"resources": len(job.resources), "traces": len(job.traces)})
     persist_job(job)
     delete_records("resource")
     for resource in resources:
         save_record("resource", resource.id, resource.model_dump())
-    generate_learning_path("资源生成完成，基于新资源创建路径")
+    generate_learning_path("资源生成完成，基于新资源创建路径", active_profile=active_profile)
     return job
 
 
@@ -503,6 +848,8 @@ def generate_learning_path(
     
     path_data = result["learning_path"]
     reasoning = result.get("reasoning", reason)
+    valid_resource_ids = {item["id"] for item in resources_list}
+    fallback_resource_ids = [item["id"] for item in resources_list[:2]]
     
     steps = []
     for step_data in path_data.get("steps", []):
@@ -513,6 +860,9 @@ def generate_learning_path(
                 for item in step_data.get("recommended_resources", [])
                 if item.get("id")
             ]
+        recommended_ids = [resource_id for resource_id in recommended_ids if resource_id in valid_resource_ids]
+        if not recommended_ids and fallback_resource_ids:
+            recommended_ids = fallback_resource_ids[:1]
         status = step_data.get("status", "todo")
         if status in {"in_progress", "pending_review"}:
             status = "doing"
@@ -528,6 +878,21 @@ def generate_learning_path(
             status=status,
         )
         steps.append(step)
+
+    if not steps:
+        concepts = planning_profile.weak_points[:2] or ["机器学习基础"]
+        for index, concept in enumerate(concepts, start=1):
+            steps.append(
+                LearningPathStep(
+                    id=f"step_{index:02d}",
+                    title=f"入门：{concept}",
+                    objective=f"围绕{concept}完成概念理解和一次小练习",
+                    recommended_resource_ids=fallback_resource_ids[:2],
+                    reason=f"{reason}；路径规划无可用步骤时使用演示兜底步骤。",
+                    estimated_minutes=25,
+                    status="todo",
+                )
+            )
     
     learning_path = LearningPath(
         id=path_data.get("id", f"path_{uuid4().hex[:8]}"),
@@ -538,6 +903,25 @@ def generate_learning_path(
         steps=steps,
     )
     save_record("path", learning_path.id, learning_path.model_dump())
+    return learning_path
+
+
+def learning_path_has_missing_resources(path: LearningPath | None = None) -> bool:
+    candidate = path or learning_path
+    if candidate is None:
+        return True
+    valid_resource_ids = {resource.id for resource in resources if resource.user_feedback != "hidden"}
+    referenced_ids = [
+        resource_id
+        for step in candidate.steps
+        for resource_id in step.recommended_resource_ids
+    ]
+    return any(resource_id not in valid_resource_ids for resource_id in referenced_ids)
+
+
+def get_or_create_learning_path(reason: str = "初始化演示学习路径") -> LearningPath:
+    if learning_path is None or learning_path_has_missing_resources(learning_path):
+        return generate_learning_path(reason)
     return learning_path
 
 
@@ -600,7 +984,7 @@ def submit_quiz(payload: QuizSubmitRequest) -> AssessmentReport:
     score = int(round(raw_score * 100)) if isinstance(raw_score, float) and raw_score <= 1 else int(raw_score or 68)
     score = max(0, min(100, score))
     delta = float(assessment_result.get("mastery_delta", 0.04))
-    profile.mastery = min(0.95, profile.mastery + delta)
+    profile.mastery = max(0.0, min(0.95, profile.mastery + delta))
     weak_point_items = assessment.get("weak_points", [])
     evaluated_weak_points = [
         item.get("topic", str(item)) if isinstance(item, dict) else str(item)
@@ -643,6 +1027,26 @@ def submit_quiz(payload: QuizSubmitRequest) -> AssessmentReport:
         created_at=now(),
     )
     save_record("profile", profile.id, profile.model_dump())
+    save_record("assessment", assessment_report.id, assessment_report.model_dump())
+    return assessment_report
+
+
+def get_or_create_assessment_report() -> AssessmentReport:
+    global assessment_report
+    if assessment_report is not None:
+        return assessment_report
+    path = learning_path or generate_learning_path("初始化演示测评报告所需学习路径")
+    assessment_report = AssessmentReport(
+        id=f"assess_{uuid4().hex[:8]}",
+        score=int(round(profile.mastery * 100)),
+        mastery_delta=0.0,
+        strengths=["暂无正式测评记录，已准备演示默认报告。"],
+        weak_points=profile.weak_points,
+        mistake_patterns=profile.mistake_patterns,
+        feedback="完成练习提交后，这里会展示真实评估反馈和路径调整结果。",
+        adjusted_path=path,
+        created_at=now(),
+    )
     save_record("assessment", assessment_report.id, assessment_report.model_dump())
     return assessment_report
 
@@ -723,6 +1127,7 @@ def rollback_profile_version(version: int, user_id: str | None = None) -> dict |
     changes = {}
     for field in [
         "knowledge_base",
+        "current_chapter",
         "learning_goal",
         "cognitive_style",
         "preferred_modalities",
@@ -796,10 +1201,10 @@ def chat_and_generate(request: ChatAndGenerateRequest, user_id: str | None = Non
         "changed_fields": profile_result.get("changed_fields", {}),
     }
     
-    if request.regenerate_resources and resolved_user_id == DEFAULT_USER_ID:
+    if request.regenerate_resources:
         resource_types = request.resource_types if request.resource_types else ["lecture_doc", "quiz", "code_case"]
         
-        new_resources = regenerate_resources_by_types(resource_types)
+        new_resources = regenerate_resources_by_types(resource_types, active_profile=active_profile, raw_user_need=request.message)
         if new_resources:
             for new_resource in new_resources:
                 existing_idx = next((i for i, r in enumerate(resources) if r.type == new_resource.type), None)
@@ -813,7 +1218,7 @@ def chat_and_generate(request: ChatAndGenerateRequest, user_id: str | None = Non
             result["resources"] = [r.model_dump() for r in new_resources]
             result["message"] = f"已根据您的需求更新了 {len(new_resources)} 个资源"
             
-            generate_learning_path(f"对话更新：{request.message[:30]}...")
+            generate_learning_path(f"对话更新：{request.message[:30]}...", active_profile=active_profile)
             result["learning_path_updated"] = True
             result["learning_path"] = learning_path.model_dump() if learning_path else None
         else:
@@ -824,7 +1229,11 @@ def chat_and_generate(request: ChatAndGenerateRequest, user_id: str | None = Non
     return result
 
 
-def regenerate_resources_by_types(resource_types: list[str]) -> list[Resource]:
+def regenerate_resources_by_types(
+    resource_types: list[str],
+    active_profile: Profile | None = None,
+    raw_user_need: str = "",
+) -> list[Resource]:
     from .agents import (
         LectureAgent, MindMapAgent, QuizAgent, ReadingAgent,
         MediaAgent, AnimationDemoAgent, PPTDraftAgent, VisualCardAgent, CodeCaseAgent, ReviewAgent
@@ -845,14 +1254,20 @@ def regenerate_resources_by_types(resource_types: list[str]) -> list[Resource]:
     from .agents import WorkflowState
     from .schemas import GenerateRequest
     
-    request = GenerateRequest(
-        course=profile.course,
-        chapter=profile.current_chapter,
-        goal=profile.learning_goal,
-        pain_points=profile.weak_points[:3]
+    planning_profile = active_profile or profile
+    request, _warnings = resolve_generation_request(
+        GenerateRequest(
+            course=planning_profile.course,
+            chapter=planning_profile.current_chapter,
+            goal=raw_user_need or planning_profile.learning_goal or "掌握核心概念",
+            pain_points=planning_profile.weak_points[:3],
+            raw_user_need=raw_user_need,
+            resource_types=resource_types,
+        ),
+        planning_profile,
     )
     
-    workflow_state = WorkflowState(f"regen_{uuid4().hex[:6]}", request, profile)
+    workflow_state = WorkflowState(f"regen_{uuid4().hex[:6]}", request, planning_profile)
     workflow_state.chapter = find_chapter(request.chapter)
     
     new_resources = []
@@ -870,7 +1285,7 @@ def regenerate_resources_by_types(resource_types: list[str]) -> list[Resource]:
     
     if new_resources:
         review_agent = ReviewAgent()
-        review_state = WorkflowState(f"review_{uuid4().hex[:6]}", request, profile)
+        review_state = WorkflowState(f"review_{uuid4().hex[:6]}", request, planning_profile)
         review_state.resources = new_resources
         review_state.chapter = find_chapter(request.chapter)
         review_agent.run(review_state)

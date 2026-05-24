@@ -151,14 +151,111 @@ COURSE = {
     ],
 }
 
+CHAPTER_ALIASES = {
+    "人工智能概述": ["人工智能导论", "人工智能概述", "图灵测试", "弱人工智能", "智能体", "ai intro"],
+    "搜索问题与启发式搜索": ["搜索", "启发式", "启发函数", "状态空间", "代价函数", "a*", "a 星", "路径规划"],
+    "知识表示与推理": ["知识表示", "推理", "命题逻辑", "谓词逻辑", "产生式", "本体"],
+    "机器学习基础": ["机器学习基础", "训练集", "泛化", "损失函数", "过拟合", "machine learning basics"],
+    "监督学习": ["监督学习", "分类", "回归", "决策树", "评估指标", "supervised learning"],
+    "无监督学习": ["无监督学习", "聚类", "降维", "k-means", "主成分", "pca", "unsupervised learning"],
+    "神经网络与深度学习入门": ["神经网络", "深度学习", "感知机", "反向传播", "激活函数", "梯度下降", "deep learning"],
+    "自然语言处理基础": ["自然语言处理", "nlp", "分词", "词向量", "序列建模", "文本分类"],
+    "计算机视觉基础": ["计算机视觉", "图像", "卷积", "目标检测", "数据增强", "cv", "computer vision"],
+    "强化学习基础": ["强化学习", "状态", "动作", "奖励", "策略", "reinforcement learning"],
+    "大模型与提示词工程": ["大模型", "提示词", "prompt", "rag", "上下文学习", "工具调用", "llm"],
+    "AI 伦理、安全与应用实践": ["伦理", "安全", "公平", "隐私", "可解释", "安全边界"],
+}
+
+GENERIC_CHAPTER_TERMS = {"机器学习", "人工智能", "ai"}
+
+
+def _norm_text(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _chapter_by_title(title: str) -> dict | None:
+    normalized = _norm_text(title)
+    if not normalized:
+        return None
+    for chapter in COURSE["chapters"]:
+        if normalized == _norm_text(chapter["title"]):
+            return chapter
+    return None
+
+
+def match_chapter(*texts: str, fallback: str | None = None) -> dict:
+    """Return a chapter match with confidence and warnings instead of silently defaulting."""
+    joined = "\n".join(text for text in texts if text).strip()
+    normalized = _norm_text(joined)
+    fallback_chapter = _chapter_by_title(fallback or "") if fallback else None
+
+    if not normalized:
+        chapter = fallback_chapter or COURSE["chapters"][0]
+        return {
+            "chapter": chapter,
+            "confidence": 0.45 if fallback_chapter else 0.2,
+            "source": "profile" if fallback_chapter else "default",
+            "warnings": [] if fallback_chapter else ["未识别明确章节，已使用课程默认章节。"],
+        }
+
+    scores: list[tuple[float, dict, list[str]]] = []
+    for chapter in COURSE["chapters"]:
+        title = chapter["title"]
+        aliases = [title, *chapter.get("concepts", []), *CHAPTER_ALIASES.get(title, [])]
+        hits = []
+        score = 0.0
+        for alias in aliases:
+            token = _norm_text(alias)
+            if not token:
+                continue
+            if token == normalized:
+                score += 4.0
+                hits.append(alias)
+            elif token in normalized:
+                score += 2.0 if alias == title else 1.0
+                hits.append(alias)
+        if title == "机器学习基础" and any(term in normalized for term in GENERIC_CHAPTER_TERMS):
+            score -= 0.8
+        if hits:
+            scores.append((score, chapter, hits))
+
+    if scores:
+        scores.sort(key=lambda item: item[0], reverse=True)
+        score, chapter, hits = scores[0]
+        confidence = 0.95 if score >= 3.0 else 0.78 if score >= 1.5 else 0.62
+        return {
+            "chapter": chapter,
+            "confidence": confidence,
+            "source": "explicit",
+            "matched_terms": hits[:6],
+            "warnings": [] if confidence >= 0.7 else [f"章节匹配置信度较低，已根据关键词推断为{chapter['title']}。"],
+        }
+
+    chapter = fallback_chapter or COURSE["chapters"][0]
+    return {
+        "chapter": chapter,
+        "confidence": 0.55 if fallback_chapter else 0.2,
+        "source": "profile" if fallback_chapter else "default",
+        "matched_terms": [],
+        "warnings": [] if fallback_chapter else ["未识别明确章节，已使用课程默认章节。"],
+    }
+
+
+def infer_target_concepts(*texts: str, chapter_title: str = "") -> list[str]:
+    normalized = _norm_text("\n".join(text for text in texts if text))
+    chapter = _chapter_by_title(chapter_title) or match_chapter(normalized).get("chapter")
+    concepts: list[str] = []
+    for concept in chapter.get("concepts", []):
+        if _norm_text(concept) in normalized:
+            concepts.append(concept)
+    for alias in CHAPTER_ALIASES.get(chapter["title"], []):
+        if _norm_text(alias) in normalized and alias not in concepts and alias != chapter["title"]:
+            concepts.append(alias)
+    return concepts[:8]
+
 
 def find_chapter(keyword: str):
-    for chapter in COURSE["chapters"]:
-        if keyword in chapter["title"]:
-            return chapter
-    if "机器学习" in keyword:
-        return COURSE["chapters"][3]
-    return COURSE["chapters"][0]
+    return match_chapter(keyword).get("chapter")
 
 
 def question_bank() -> list[dict]:

@@ -115,6 +115,7 @@ export interface Resource {
   source_refs: string[]
   difficulty: string
   target_profile: string[]
+  personalized_reason?: string
   review_status: 'passed' | 'needs_revision' | 'blocked'
   review_reason: string
   audit_reason: string
@@ -131,6 +132,9 @@ export interface GenerateRequest {
   goal?: string
   pain_points?: string[]
   resource_types?: string[]
+  target_concepts?: string[]
+  raw_user_need?: string
+  chapter_match_confidence?: number
 }
 
 export interface PlanDecision {
@@ -159,8 +163,35 @@ export interface GenerationJob {
     payload: Record<string, unknown>
     created_at: string
   }>
+  fallback_reason?: string
   created_at: string
   completed_at: string | null
+}
+
+export interface GenerationHistoryItem extends GenerationJob {
+  is_current?: boolean
+}
+
+export interface ResourceTypeCount {
+  type: string
+  count: number
+}
+
+export interface GenerationHistorySummary {
+  id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  current_step: string
+  request: Required<GenerateRequest>
+  plan_summary: PlanSummary
+  fallback_reason?: string
+  created_at: string
+  completed_at: string | null
+  is_current?: boolean
+  resource_count: number
+  resource_type_counts: ResourceTypeCount[]
+  trace_count: number
+  event_count: number
 }
 
 export interface GenerationEvent {
@@ -186,6 +217,10 @@ export interface LearningPath {
   adjustment_reason: string
   steps: LearningPathStep[]
   updated_at: string
+}
+
+export interface LearningPathHistoryItem extends LearningPath {
+  is_current?: boolean
 }
 
 export interface ProfileChatResponse {
@@ -259,8 +294,11 @@ export interface TutorExercise {
 export interface TutorExerciseResult {
   score: number
   mastery_delta: number
+  weak_points?: string[]
+  mistake_patterns?: string[]
   feedback: string
   matched_keywords: string[]
+  adjusted_path?: LearningPath
   profile: Profile
   learning_path: LearningPath
   next_step: TutorNextStep | null
@@ -276,4 +314,8 @@ export interface AssessmentReport {
   feedback: string
   adjusted_path: LearningPath
   created_at: string
+}
+
+export interface AssessmentHistoryItem extends AssessmentReport {
+  is_current?: boolean
 }

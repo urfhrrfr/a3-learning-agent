@@ -5,3 +5,7 @@ pytest==8.3.4
 httpx==0.28.1
 redis==5.2.1
 pymysql==1.1.1
+
+# Optional vector database backend:
+# chromadb can be installed when VECTOR_STORE=chroma is needed.
+# The app defaults to the in-memory vector store and falls back to it if Chroma is unavailable.

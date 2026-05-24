@@ -2,9 +2,12 @@
   <div class="shell">
     <header class="topbar">
       <RouterLink class="brand" to="/">
-        <span class="brand-mark">A3</span>
+        <span class="brand-mark" aria-hidden="true">
+          <span class="brand-mark-node"></span>
+          <span class="brand-mark-path"></span>
+        </span>
         <span>
-          <strong>A3 学习助手</strong>
+          <strong>智学导航</strong>
           <small>Personal Learning Studio</small>
         </span>
       </RouterLink>

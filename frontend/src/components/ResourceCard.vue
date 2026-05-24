@@ -22,6 +22,7 @@
       <button class="btn secondary" type="button" @click="$emit('select', resource)">开始学习</button>
       <button class="btn ghost" type="button" @click="$emit('select', resource)">查看详情</button>
       <button
+        v-if="!props.readonly"
         class="btn ghost"
         type="button"
         :disabled="resource.user_feedback === 'favorite'"
@@ -30,6 +31,7 @@
         收藏
       </button>
       <button
+        v-if="!props.readonly"
         class="btn ghost"
         type="button"
         :disabled="resource.user_feedback === 'hidden'"
@@ -38,7 +40,7 @@
         屏蔽
       </button>
       <button
-        v-if="resource.user_feedback !== 'neutral'"
+        v-if="!props.readonly && resource.user_feedback !== 'neutral'"
         class="btn ghost"
         type="button"
         @click="$emit('feedback', resource, 'neutral')"
@@ -56,7 +58,7 @@
 import { computed } from 'vue'
 import type { Resource } from '../types'
 
-const props = defineProps<{ resource: Resource; compact?: boolean }>()
+const props = defineProps<{ resource: Resource; compact?: boolean; readonly?: boolean }>()
 
 defineEmits<{
   select: [resource: Resource]
@@ -89,6 +91,7 @@ const summaryText = computed(() => {
 })
 
 const audienceLabel = computed(() => {
+  if (props.resource.personalized_reason) return props.resource.personalized_reason
   const tags = props.resource.target_profile.filter(Boolean).slice(0, 3)
   return tags.length ? tags.join(' / ') : '适合当前学习目标'
 })

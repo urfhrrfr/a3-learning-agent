@@ -2,8 +2,8 @@
   <section class="panel weak-cloud-card">
     <div class="panel-title">
       <div>
-        <h2>薄弱点云</h2>
-        <p class="muted compact">合并画像、评估报告和路径调整原因中的已有薄弱信息。</p>
+        <h2>当前档案薄弱点</h2>
+        <p class="muted compact">只展示当前画像和本轮之后的评估信息，历史评估会在画像页单独说明。</p>
       </div>
       <span class="status">{{ items.length }} 个</span>
     </div>
@@ -23,7 +23,7 @@
 
     <div v-else class="empty small-empty">
       <strong>暂未识别薄弱知识点</strong>
-      <span>完成一次练习评估后，系统将自动识别薄弱知识点。</span>
+      <span>输入学习困惑或完成一次练习评估后，系统将自动识别薄弱知识点。</span>
       <RouterLink class="btn ghost" to="/assessment">去做练习</RouterLink>
     </div>
   </section>

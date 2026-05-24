@@ -1,10 +1,14 @@
 import type {
   ApiResponse,
   AssessmentReport,
+  AssessmentHistoryItem,
   GenerateRequest,
   GenerationJob,
+  GenerationHistoryItem,
+  GenerationHistorySummary,
   HealthStatus,
   LearningPath,
+  LearningPathHistoryItem,
   Profile,
   ProfileChangeLog,
   ProfileChatResponse,
@@ -16,7 +20,7 @@ import type {
   TutorResponse
 } from './types'
 
-const API_BASE = import.meta.env.VITE_API_BASE || ''
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 const USER_ID_STORAGE_KEY = 'a3_learning_user_id'
 
 function userId() {
@@ -73,6 +77,8 @@ export const api = {
   generationEventsUrl: (job_id: string) => `${API_BASE}/api/jobs/${job_id}/events`,
   job: (job_id: string) => request<GenerationJob>(`/api/jobs/${job_id}`),
   resources: () => request<Resource[]>('/api/resources'),
+  resourceHistory: () => request<GenerationHistorySummary[]>('/api/resources/history'),
+  resourceHistoryDetail: (job_id: string) => request<GenerationHistoryItem>(`/api/resources/history/${job_id}`),
   resource: (resource_id: string) => request<Resource>(`/api/resources/${resource_id}`),
   resourceFeedback: (resource_id: string, action: Resource['user_feedback']) =>
     request<{ resource: Resource; learning_path: LearningPath | null }>('/api/resources/feedback', {
@@ -80,6 +86,7 @@ export const api = {
       body: JSON.stringify({ resource_id, action })
     }),
   path: () => request<LearningPath>('/api/learning-path/current'),
+  pathHistory: () => request<LearningPathHistoryItem[]>('/api/learning-path/history'),
   generatePath: () => request<LearningPath>('/api/learning-path/generate', { method: 'POST' }),
   tutor: (question: string, resource_id?: string | null, history: TutorMessage[] = []) =>
     request<TutorResponse>('/api/tutor/chat', { method: 'POST', body: JSON.stringify({ question, resource_id, history }) }),
@@ -96,5 +103,6 @@ export const api = {
   refreshQuiz: () => request<Resource>('/api/quiz/refresh', { method: 'POST' }),
   submitQuiz: (answers: string[], resource_id?: string | null) =>
     request<AssessmentReport>('/api/quiz/submit', { method: 'POST', body: JSON.stringify({ answers, resource_id }) }),
-  assessment: () => request<AssessmentReport | null>('/api/assessment/report')
+  assessment: () => request<AssessmentReport | null>('/api/assessment/report'),
+  assessmentHistory: () => request<AssessmentHistoryItem[]>('/api/assessment/history')
 }
