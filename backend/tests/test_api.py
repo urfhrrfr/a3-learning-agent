@@ -1,6 +1,9 @@
 import json
 import os
+from pathlib import Path
 
+import pytest
+from fastapi import Header
 from fastapi.testclient import TestClient
 from uuid import uuid4
 
@@ -11,10 +14,11 @@ os.environ["REDIS_URL"] = ""
 os.environ.setdefault("VECTOR_STORE", "memory")
 
 from app import cache, state, storage
-from app.agents import AnimationDemoAgent, KnowledgeAgent, Orchestrator, PlannerAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.agents import AnimationDemoAgent, KnowledgeAgent, Orchestrator, PlannerAgent, PPTDraftAgent, ProfileAgent, ReviewAgent, WorkflowState
+from app.auth import current_user
 from app.core.profile_normalizer import ProfileNormalizer
 from app.core.profile_validator import ProfileValidator
-from app.knowledge import COURSE, question_bank
+from app.knowledge import CHAPTER_BLUEPRINTS, COURSE, question_bank
 from app.main import app
 from app.path_planner import PathPlanner
 from app.providers.factory import get_llm_provider
@@ -25,6 +29,17 @@ from app.schemas import GenerateRequest, Profile, Resource
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def authenticated_test_user():
+    def _current_user(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
+        user_id = x_user_id or state.DEFAULT_USER_ID
+        return {"id": user_id, "username": user_id, "display_name": user_id}
+
+    app.dependency_overrides[current_user] = _current_user
+    yield
+    app.dependency_overrides.pop(current_user, None)
 
 
 class SemanticFusionLLM(MockLLMProvider):
@@ -111,6 +126,14 @@ class ShortInvalidAnimationLLM(MockLLMProvider):
             },
             ensure_ascii=False,
         )
+
+
+class InvalidPPTJsonLLM(MockLLMProvider):
+    name = "invalid-ppt-json-test"
+
+    def complete(self, prompt: str) -> str:
+        assert "HTML PPT" in prompt
+        return "这不是 JSON，只是一段说明。"
 
 
 def payload(response):
@@ -227,7 +250,7 @@ ASSESSMENT_FIELDS = {
 
 
 def test_course_knowledge_base_has_rich_question_metadata():
-    assert len(COURSE["chapters"]) == 12
+    assert len(COURSE["chapters"]) == 13
     assert len(COURSE["code_cases"]) >= 6
 
     for chapter in COURSE["chapters"]:
@@ -247,7 +270,7 @@ def test_course_knowledge_base_has_rich_question_metadata():
             assert question["rubric"]
 
     questions = question_bank()
-    assert len(questions) == 60
+    assert len(questions) == 65
     assert_fields(
         questions[0],
         {"answer", "analysis", "difficulty", "assessment_point", "options", "rubric"},
@@ -257,6 +280,7 @@ def test_course_knowledge_base_has_rich_question_metadata():
 def test_profile_chat_updates_profile():
     data = payload(client.post("/api/profile/chat", json={"message": "我线性代数薄弱，希望多给 Python 代码案例"}))
     assert data["profile"]["version"] >= 2
+    assert data["turn_profile"]["weak_points"] == ["线性代数"]
     assert "代码案例" in data["profile"]["preferred_modalities"]
     assert data["fusion_meta"]["source"] in {"fallback", "llm"}
 
@@ -576,6 +600,40 @@ def test_profile_fallback_normalizes_synonyms_and_implicit_weakness():
     assert "validation" in agent.last_fusion_meta
 
 
+def test_profile_current_confusions_replace_stale_prerequisite_weak_points():
+    current = state.Profile(
+        learning_goal="完成课程项目，并优先补习概率论等基础",
+        knowledge_base=["概率论", "Python"],
+        weak_points=["概率论", "Python"],
+        preferred_modalities=["阅读材料"],
+        updated_at=state.now(),
+    )
+    agent = ProfileAgent(MockLLMProvider())
+    message = (
+        "我正在学习人工智能导论，目标是能完成课程项目和答辩。"
+        "我现在对 A* 搜索、过拟合、Transformer 自注意力、RAG 的 Top-K 和重排序比较困惑。"
+        "我喜欢图解、步骤化讲解和代码案例，不太喜欢大段理论。"
+    )
+    extraction = agent.extract(message, current)
+
+    fused, _, _ = agent.fuse(current, extraction, latest_message=message)
+
+    assert fused.learning_goal == "完成课程项目"
+    assert "A*搜索" in fused.weak_points
+    assert "过拟合" in fused.weak_points
+    assert "Transformer自注意力" in fused.weak_points
+    assert "RAG" in fused.weak_points
+    assert "Top-K检索" in fused.weak_points
+    assert "重排序" in fused.weak_points
+    assert "概率论" not in fused.weak_points
+    assert "Python" not in fused.weak_points
+    assert "概率论" not in fused.knowledge_base
+    assert "Python" not in fused.knowledge_base
+    assert "概率论" not in fused.learning_goal
+    assert "图解" in fused.preferred_modalities
+    assert "代码案例" in fused.preferred_modalities
+
+
 def test_generation_returns_resources_and_trace():
     data = payload(
         client.post(
@@ -632,6 +690,73 @@ def test_generation_returns_resources_and_trace():
     assert "[来源:" in code_case
 
 
+def test_html_ppt_agent_generates_previewable_html_payload():
+    workflow = WorkflowState(
+        "job_html_ppt_test",
+        GenerateRequest(chapter="机器学习基础", goal="生成教学 PPT", resource_types=["html_ppt"]),
+        Profile(updated_at=state.now(), preferred_modalities=["PPT"]),
+    )
+
+    PPTDraftAgent(MockLLMProvider()).run(workflow)
+
+    assert len(workflow.resources) == 1
+    resource = workflow.resources[0]
+    payload_data = json.loads(resource.content)
+    assert resource.type == "html_ppt"
+    assert resource.content_format == "json"
+    assert resource.artifact_url == ""
+    assert resource.artifact_filename == ""
+    assert resource.artifact_path == ""
+    assert payload_data["kind"] == "html_ppt"
+    assert len(payload_data["slides"]) >= 8
+    assert "<!doctype html>" in payload_data["html_document"].lower()
+    assert "机器学习基础" in payload_data["html_document"]
+
+
+def test_generate_endpoint_only_ppt_mode_returns_one_html_ppt_resource():
+    app.dependency_overrides[current_user] = lambda: {"id": f"html-ppt-user-{uuid4().hex[:8]}"}
+    try:
+        data = payload(
+            client.post(
+                "/api/resources/generate",
+                json={
+                    "course": "人工智能导论",
+                    "chapter": "机器学习基础",
+                    "goal": "生成教学 PPT",
+                    "resource_types": ["html_ppt"],
+                },
+            )
+        )
+    finally:
+        app.dependency_overrides.pop(current_user, None)
+
+    assert data["status"] == "completed"
+    assert len(data["resources"]) == 1
+    assert data["resources"][0]["type"] == "html_ppt"
+    payload_data = json.loads(data["resources"][0]["content"])
+    assert payload_data["kind"] == "html_ppt"
+    assert payload_data["html_document"]
+
+
+def test_html_ppt_agent_falls_back_when_llm_returns_invalid_json():
+    workflow = WorkflowState(
+        "job_html_ppt_invalid_json_test",
+        GenerateRequest(chapter="机器学习基础", goal="生成教学 PPT", resource_types=["html_ppt"]),
+        Profile(updated_at=state.now(), preferred_modalities=["PPT"]),
+    )
+
+    result = PPTDraftAgent(InvalidPPTJsonLLM()).run(workflow)
+    resource = workflow.resources[0]
+    payload_data = json.loads(resource.content)
+
+    assert resource.type == "html_ppt"
+    assert payload_data["kind"] == "html_ppt"
+    assert "<html" in payload_data["html_document"].lower()
+    assert resource.artifact_url == ""
+    assert result["warnings"]
+    assert "invalid HTML PPT JSON" in result["warnings"][0]
+
+
 def test_planner_agent_personalizes_resource_mix_by_profile():
     profile = state.Profile(
         mastery=0.24,
@@ -678,10 +803,49 @@ def test_animation_agent_normalizes_llm_script_to_four_scene_template():
     assert used_llm is True
     assert reason == ""
     assert payload_data["template"] == "network"
+    assert payload_data["schema_version"] == 2
+    assert payload_data["teaching_model_id"] == "neural_training_loop"
     assert payload_data["topic"] == workflow_state.chapter["title"]
     assert len(payload_data["frames"]) == 4
     assert all(len(frame["scene_objects"]) == 4 for frame in payload_data["frames"])
-    assert all({"title", "caption", "focus", "visual", "metric", "takeaway"} <= set(frame) for frame in payload_data["frames"])
+    assert all({"title", "caption", "focus", "visual", "metric", "action", "misconception", "takeaway"} <= set(frame) for frame in payload_data["frames"])
+
+
+def test_animation_agent_uses_reinforcement_learning_teaching_model():
+    profile = Profile(
+        weak_points=["状态", "动作", "奖励", "策略"],
+        preferred_modalities=["动画"],
+        updated_at=state.now(),
+    )
+    request = GenerateRequest(
+        chapter="强化学习基础",
+        goal="用动画讲清状态、动作、奖励、策略",
+        resource_types=["animation_demo"],
+    )
+    workflow_state = WorkflowState("job_reinforcement_animation_test", request, profile)
+
+    payload_data = json.loads(AnimationDemoAgent().content(workflow_state))
+    serialized = json.dumps(payload_data, ensure_ascii=False)
+
+    assert payload_data["schema_version"] == 2
+    assert payload_data["teaching_model_id"] == "reinforcement_loop"
+    assert len(payload_data["frames"]) == 4
+    assert all(word in serialized for word in ["状态", "动作", "奖励", "策略"])
+    assert "把问题交给 AI" not in serialized
+    assert "AI 会一步步处理信息" not in serialized
+
+
+def test_animation_agent_maps_all_blueprint_concepts_to_teaching_models():
+    agent = AnimationDemoAgent()
+    allowed = agent.allowed_teaching_models
+    profile = Profile(updated_at=state.now())
+
+    for title, concepts in CHAPTER_BLUEPRINTS:
+        request = GenerateRequest(chapter=title, goal="生成教学动画", resource_types=["animation_demo"])
+        workflow_state = WorkflowState(f"job_mapping_{title}", request, profile)
+        for concept in concepts:
+            model_id = agent._teaching_model_for_concept(concept, workflow_state)
+            assert model_id in allowed, f"{title} / {concept} did not map to a teaching model"
 
 
 def test_orchestrator_respects_planner_selected_resources():
@@ -875,6 +1039,45 @@ def test_current_learning_path_repairs_stale_resource_references():
         state.resources = original_resources
         state.learning_path = original_path
         state.assessment_report = original_assessment
+
+
+def test_clear_profile_also_clears_current_learning_path():
+    user_id = f"profile_clear_{uuid4().hex[:8]}"
+    headers = {"X-User-Id": user_id}
+    profile = Profile(
+        id=user_id,
+        learning_goal="Clear profile contract",
+        weak_points=["stale path"],
+        updated_at=state.now(),
+    )
+    path = state.LearningPath(
+        id=f"path_{uuid4().hex[:8]}",
+        profile_version=profile.version,
+        mastery=0.3,
+        adjustment_reason="clear profile test",
+        updated_at=state.now(),
+        steps=[
+            state.LearningPathStep(
+                id="step_01",
+                title="Stale task",
+                objective="Should disappear after profile clear",
+                recommended_resource_ids=[],
+                reason="test",
+                estimated_minutes=10,
+            )
+        ],
+    )
+    state.set_profile_for_user(user_id, profile)
+    state.set_user_learning_path(user_id, path)
+
+    cleared = payload(client.delete("/api/profile/current", headers=headers))
+    current_path = payload(client.get("/api/learning-path/current", headers=headers))
+    history = payload(client.get("/api/learning-path/history", headers=headers))
+
+    assert cleared["deleted"] is True
+    assert cleared["learning_path"] is None
+    assert current_path is None
+    assert history == []
 
 
 def test_api_contract_endpoints_return_documented_shapes():
@@ -1094,6 +1297,43 @@ def test_job_endpoint_recovers_job_snapshot_from_redis_cache(monkeypatch):
         assert state.jobs["job_cached_snapshot"].progress == 100
     finally:
         state.jobs = original_jobs
+
+
+def test_delete_failed_resource_history_job(monkeypatch, tmp_path):
+    original_jobs = state.jobs
+    original_job_user_ids = state.job_user_ids
+    test_db = tmp_path / f"test_delete_history_{uuid4().hex}.db"
+    monkeypatch.setattr(storage, "DB_PATH", test_db)
+    try:
+        state.jobs = {}
+        state.job_user_ids = {}
+        job = state.GenerationJob(
+            id="job_failed_delete",
+            status="failed",
+            progress=100,
+            current_step="job_failed",
+            request=state.GenerateRequest(chapter="机器学习基础", goal="删除失败记录"),
+            fallback_reason="test failure",
+            created_at=state.now(),
+            completed_at=state.now(),
+        )
+        state.jobs[job.id] = job
+        state.job_user_ids[job.id] = state.DEFAULT_USER_ID
+        state.persist_job(job)
+        state.job_user_ids[job.id] = "stale-memory-owner"
+
+        before = payload(client.get("/api/resources/history"))
+        assert any(item["id"] == job.id for item in before)
+
+        deleted = payload(client.delete(f"/api/resources/history/{job.id}"))
+        assert deleted == {"deleted": True, "job_id": job.id}
+
+        after = payload(client.get("/api/resources/history"))
+        assert all(item["id"] != job.id for item in after)
+        error_payload(client.get(f"/api/resources/history/{job.id}"), 404)
+    finally:
+        state.jobs = original_jobs
+        state.job_user_ids = original_job_user_ids
 
 
 def test_review_agent_attempts_real_llm_fact_check():

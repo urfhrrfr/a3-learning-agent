@@ -91,7 +91,9 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest tests -p no:cacheprovider
 ```
 
-当前结果：`28 passed`
+当前结果：`62 passed`
+
+提交包说明：本项目按源码方式提交，依赖安装产物不随作品包提交。后端请通过 `pip install -r requirements.txt` 安装依赖，前端请通过 `npm install` 安装依赖；`.venv`、`node_modules`、日志、缓存、运行时数据库和临时构建目录不属于提交内容。
 
 前端构建：
 

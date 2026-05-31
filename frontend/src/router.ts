@@ -6,10 +6,13 @@ import Resources from './pages/Resources.vue'
 import Path from './pages/Path.vue'
 import Tutor from './pages/Tutor.vue'
 import Assessment from './pages/Assessment.vue'
+import Auth from './pages/Auth.vue'
+import { authToken } from './api'
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/auth', component: Auth, meta: { public: true } },
     { path: '/', component: Workspace },
     { path: '/profile', component: Profile },
     { path: '/generate', component: Generate },
@@ -18,4 +21,13 @@ export const router = createRouter({
     { path: '/tutor', component: Tutor },
     { path: '/assessment', component: Assessment }
   ]
+})
+
+router.beforeEach((to) => {
+  if (!to.meta.public && !authToken()) {
+    return { path: '/auth', query: { redirect: to.fullPath } }
+  }
+  if (to.path === '/auth' && authToken()) {
+    return '/'
+  }
 })

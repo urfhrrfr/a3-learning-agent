@@ -14,10 +14,6 @@
       <strong>{{ audienceLabel }}</strong>
     </div>
 
-    <p v-if="resource.review_status === 'needs_revision'" class="soft-note">
-      内容可先查看，完整质检说明在详情页。
-    </p>
-
     <div class="resource-actions">
       <button class="btn secondary" type="button" @click="$emit('select', resource)">开始学习</button>
       <button class="btn ghost" type="button" @click="$emit('select', resource)">查看详情</button>
@@ -72,7 +68,7 @@ const typeLabels: Record<string, string> = {
   reading: '拓展阅读',
   media_script: '视频脚本',
   animation_demo: '动画演示',
-  ppt_draft: 'PPT 草稿',
+  html_ppt: 'HTML PPT',
   visual_card: '学习卡片',
   code_case: '代码实验'
 }
@@ -91,10 +87,18 @@ const summaryText = computed(() => {
 })
 
 const audienceLabel = computed(() => {
-  if (props.resource.personalized_reason) return props.resource.personalized_reason
+  if (props.resource.personalized_reason) return compactText(props.resource.personalized_reason)
   const tags = props.resource.target_profile.filter(Boolean).slice(0, 3)
   return tags.length ? tags.join(' / ') : '适合当前学习目标'
 })
+
+function compactText(value: string) {
+  const cleaned = value
+    .replace(/\s+/g, ' ')
+    .replace(/；/g, '； ')
+    .trim()
+  return cleaned.length > 72 ? `${cleaned.slice(0, 72)}...` : cleaned
+}
 
 const feedbackLabel = computed(() => {
   if (props.resource.user_feedback === 'favorite') return '已收藏，后续推荐会优先考虑'

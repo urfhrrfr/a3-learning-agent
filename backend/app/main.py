@@ -23,7 +23,7 @@ load_env_file(Path(__file__).parent / ".env")
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from . import state
 from .routes import router
@@ -92,3 +92,16 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(router)
 
 state.hydrate_from_db()
+
+
+@app.get("/api/artifacts/{filename}")
+def download_artifact(filename: str):
+    safe_name = Path(filename).name
+    target = backend_root / "generated" / "pptx" / safe_name
+    if not target.exists() or target.suffix.lower() != ".pptx":
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return FileResponse(
+        target,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=safe_name,
+    )

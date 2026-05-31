@@ -28,19 +28,24 @@ from .schemas import (
     PlanDecision,
     PlanSummary,
 )
-from .storage import delete_records, load_latest_record, load_records, save_record
+from .storage import delete_records, load_latest_record, load_records, load_records_with_ids, save_record
 
 
 profile = Profile(updated_at=now())
 profiles: dict[str, Profile] = {}
 jobs: dict[str, GenerationJob] = {}
 job_profiles: dict[str, Profile] = {}
+job_user_ids: dict[str, str] = {}
 resources = []
+resources_by_user: dict[str, list[Resource]] = {}
 learning_path: LearningPath | None = None
+learning_paths_by_user: dict[str, LearningPath] = {}
 assessment_report: AssessmentReport | None = None
+assessment_reports_by_user: dict[str, AssessmentReport] = {}
 DEFAULT_USER_ID = "student_demo"
 generation_lock = Lock()
 active_generation_job_id: str | None = None
+active_generation_job_ids: dict[str, str] = {}
 
 
 PROFILE_DIMENSIONS = [
@@ -179,8 +184,9 @@ def fallback_resources(request: GenerateRequest, reason: str) -> list[Resource]:
 
 
 def persist_job(job: GenerationJob) -> None:
-    payload = job.model_dump()
-    save_record("job", job.id, payload)
+    user_id = job_user_ids.get(job.id, DEFAULT_USER_ID)
+    payload = with_user_payload(job.model_dump(), user_id)
+    save_record("job", scoped_record_id(user_id, job.id), payload)
     cache_job(job.id, payload)
 
 
@@ -192,6 +198,7 @@ def get_job(job_id: str) -> GenerationJob | None:
     if cached:
         try:
             job = GenerationJob(**cached)
+            job_user_ids[job.id] = normalize_user_id(cached.get("user_id"))
             jobs[job.id] = job
             return job
         except Exception:  # noqa: BLE001
@@ -201,6 +208,7 @@ def get_job(job_id: str) -> GenerationJob | None:
     if stored:
         try:
             job = GenerationJob(**stored)
+            job_user_ids[job.id] = normalize_user_id(stored.get("user_id"))
             jobs[job.id] = job
             return job
         except Exception:  # noqa: BLE001
@@ -212,13 +220,17 @@ def _record_time_key(item: dict) -> str:
     return str(item.get("completed_at") or item.get("updated_at") or item.get("created_at") or "")
 
 
-def latest_generation_job_id() -> str:
-    if active_generation_job_id:
-        return active_generation_job_id
+def latest_generation_job_id(user_id: str | None = None) -> str:
+    resolved_user_id = normalize_user_id(user_id)
+    active_id = active_generation_job_ids.get(resolved_user_id)
+    if resolved_user_id == DEFAULT_USER_ID and active_generation_job_id:
+        active_id = active_generation_job_id
+    if active_id:
+        return active_id
     completed_jobs = [
         job
         for job in jobs.values()
-        if job.status == "completed" and job.resources
+        if job.status == "completed" and job.resources and job_user_ids.get(job.id, DEFAULT_USER_ID) == resolved_user_id
     ]
     if not completed_jobs:
         return ""
@@ -226,20 +238,23 @@ def latest_generation_job_id() -> str:
     return latest.id
 
 
-def _generation_history_jobs(limit: int = 20) -> tuple[list[GenerationJob], str]:
+def _generation_history_jobs(limit: int = 20, user_id: str | None = None) -> tuple[list[GenerationJob], str]:
+    resolved_user_id = normalize_user_id(user_id)
     loaded = []
-    for item in load_records("job"):
+    for item in load_user_records("job", resolved_user_id):
         try:
             job = GenerationJob(**item)
             loaded.append(job)
             jobs.setdefault(job.id, job)
+            job_user_ids[job.id] = resolved_user_id
         except Exception:  # noqa: BLE001
             continue
-    current_id = latest_generation_job_id()
+    current_id = latest_generation_job_id(resolved_user_id)
     candidates = [
         job
         for job in {job.id: job for job in [*loaded, *jobs.values()]}.values()
-        if job.resources or job.status in {"queued", "running", "failed"}
+        if job_user_ids.get(job.id, DEFAULT_USER_ID) == resolved_user_id
+        and (job.resources or job.status in {"queued", "running", "failed"})
     ]
     candidates = sorted(candidates, key=lambda item: item.completed_at or item.created_at, reverse=True)
     return candidates[: max(1, min(limit, 100))], current_id
@@ -252,8 +267,8 @@ def _resource_type_counts(job: GenerationJob) -> list[dict[str, int | str]]:
     return [{"type": resource_type, "count": count} for resource_type, count in counts.items()]
 
 
-def generation_history(limit: int = 20) -> list[dict]:
-    candidates, current_id = _generation_history_jobs(limit)
+def generation_history(limit: int = 20, user_id: str | None = None) -> list[dict]:
+    candidates, current_id = _generation_history_jobs(limit, user_id)
     return [
         {
             "id": job.id,
@@ -275,23 +290,52 @@ def generation_history(limit: int = 20) -> list[dict]:
     ]
 
 
-def generation_history_detail(job_id: str) -> dict | None:
-    job = get_job(job_id)
-    if not job or not (job.resources or job.status in {"queued", "running", "failed"}):
+def generation_history_detail(job_id: str, user_id: str | None = None) -> dict | None:
+    resolved_user_id = normalize_user_id(user_id)
+    stored_job = next((item for item in load_user_records("job", resolved_user_id) if item.get("id") == job_id), None)
+    job = GenerationJob(**stored_job) if stored_job else get_job(job_id)
+    if stored_job:
+        jobs[job.id] = job
+        job_user_ids[job.id] = resolved_user_id
+    if not job or job_user_ids.get(job.id, DEFAULT_USER_ID) != resolved_user_id or not (job.resources or job.status in {"queued", "running", "failed"}):
         return None
-    current_id = latest_generation_job_id()
+    current_id = latest_generation_job_id(resolved_user_id)
     return {
         **job.model_dump(),
         "is_current": job.id == current_id,
     }
 
 
-def learning_path_history(limit: int = 20) -> list[dict]:
-    records = load_records("path")
-    if learning_path and not any(item.get("id") == learning_path.id for item in records):
-        records.append(learning_path.model_dump())
+def delete_generation_history_job(job_id: str, user_id: str | None = None) -> bool:
+    global active_generation_job_id
+
+    resolved_user_id = normalize_user_id(user_id)
+    stored_job = next((item for item in load_user_records("job", resolved_user_id) if item.get("id") == job_id), None)
+    memory_owner = job_user_ids.get(job_id)
+    if stored_job is None and memory_owner != resolved_user_id:
+        return False
+
+    delete_records("job", [scoped_record_id(resolved_user_id, job_id), job_id])
+    jobs.pop(job_id, None)
+    job_profiles.pop(job_id, None)
+    job_user_ids.pop(job_id, None)
+
+    if active_generation_job_ids.get(resolved_user_id) == job_id:
+        active_generation_job_ids.pop(resolved_user_id, None)
+    if resolved_user_id == DEFAULT_USER_ID and active_generation_job_id == job_id:
+        active_generation_job_id = None
+
+    return True
+
+
+def learning_path_history(limit: int = 20, user_id: str | None = None) -> list[dict]:
+    resolved_user_id = normalize_user_id(user_id)
+    records = load_user_records("path", resolved_user_id)
+    current_path = get_user_learning_path(resolved_user_id)
+    if current_path and not any(item.get("id") == current_path.id for item in records):
+        records.append(with_user_payload(current_path.model_dump(), resolved_user_id))
     records = sorted(records, key=_record_time_key, reverse=True)
-    current_id = learning_path.id if learning_path else ""
+    current_id = current_path.id if current_path else ""
     return [
         {
             **item,
@@ -301,12 +345,14 @@ def learning_path_history(limit: int = 20) -> list[dict]:
     ]
 
 
-def assessment_history(limit: int = 20) -> list[dict]:
-    records = load_records("assessment")
-    if assessment_report and not any(item.get("id") == assessment_report.id for item in records):
-        records.append(assessment_report.model_dump())
+def assessment_history(limit: int = 20, user_id: str | None = None) -> list[dict]:
+    resolved_user_id = normalize_user_id(user_id)
+    records = load_user_records("assessment", resolved_user_id)
+    current_report = get_user_assessment_report(resolved_user_id)
+    if current_report and not any(item.get("id") == current_report.id for item in records):
+        records.append(with_user_payload(current_report.model_dump(), resolved_user_id))
     records = sorted(records, key=_record_time_key, reverse=True)
-    current_id = assessment_report.id if assessment_report else ""
+    current_id = current_report.id if current_report else ""
     return [
         {
             **item,
@@ -329,6 +375,28 @@ def build_plan_summary(plan_details: list[dict]) -> PlanSummary:
     ]
     total_estimated_time = sum(int(item.get("estimated_minutes", 0) or 0) for item in plan_details)
     return PlanSummary(total_estimated_time=total_estimated_time, decisions=decisions)
+
+
+def infer_requested_resource_types(*parts: str) -> list[str]:
+    text = " ".join(part for part in parts if part).lower()
+    if not text.strip():
+        return []
+    resource_keywords: list[tuple[str, tuple[str, ...]]] = [
+        ("lecture_doc", ("讲解", "讲义", "文档", "解释", "lecture", "lesson")),
+        ("mind_map", ("导图", "思维导图", "脑图", "知识图谱", "mind map", "mindmap")),
+        ("quiz", ("练习题", "练习", "题目", "测验", "自测", "quiz", "practice", "exercise")),
+        ("reading", ("阅读", "拓展阅读", "延伸阅读", "资料阅读", "reading")),
+        ("media_script", ("视频脚本", "分镜", "脚本", "短视频", "微课脚本", "script")),
+        ("animation_demo", ("动画", "动画演示", "动态图", "演示动画", "animation")),
+        ("html_ppt", ("ppt", "课件", "幻灯片", "slides", "slide")),
+        ("visual_card", ("卡片", "学习卡片", "速记卡", "记忆卡", "flashcard")),
+        ("code_case", ("代码", "代码案例", "实验", "实操", "python", "code")),
+    ]
+    inferred = []
+    for resource_type, keywords in resource_keywords:
+        if any(keyword in text for keyword in keywords):
+            inferred.append(resource_type)
+    return inferred
 
 
 def resolve_generation_request(request: GenerateRequest, active_profile: Profile | None = None) -> tuple[GenerateRequest, list[str]]:
@@ -367,6 +435,7 @@ def resolve_generation_request(request: GenerateRequest, active_profile: Profile
     target_concepts = list(dict.fromkeys([*request.target_concepts, *inferred_concepts]))[:12]
     pain_points = list(dict.fromkeys([*request.pain_points, *planning_profile.weak_points]))[:10]
     goal = raw_need or planning_profile.learning_goal or request.goal
+    resource_types = request.resource_types or infer_requested_resource_types(raw_need, request.goal)
     resolved = request.model_copy(
         update={
             "course": request.course or planning_profile.course or "人工智能导论",
@@ -374,6 +443,7 @@ def resolve_generation_request(request: GenerateRequest, active_profile: Profile
             "goal": goal,
             "pain_points": pain_points,
             "target_concepts": target_concepts,
+            "resource_types": resource_types,
             "raw_user_need": raw_need,
             "chapter_match_confidence": float(match.get("confidence", 0.0)),
         }
@@ -387,6 +457,138 @@ def resolve_generation_request(request: GenerateRequest, active_profile: Profile
 def normalize_user_id(user_id: str | None = None) -> str:
     raw = (user_id or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
     return re.sub(r"[^a-zA-Z0-9_.:-]", "_", raw)[:80]
+
+
+def scoped_record_id(user_id: str | None, record_id: str) -> str:
+    resolved_user_id = normalize_user_id(user_id)
+    return f"{resolved_user_id}:{record_id}"
+
+
+def with_user_payload(payload: dict, user_id: str | None) -> dict:
+    resolved_user_id = normalize_user_id(user_id)
+    return {**payload, "user_id": resolved_user_id}
+
+
+def record_belongs_to_user(item: dict, user_id: str | None) -> bool:
+    resolved_user_id = normalize_user_id(user_id)
+    item_user_id = item.get("user_id")
+    if item_user_id:
+        return item_user_id == resolved_user_id
+    return resolved_user_id == DEFAULT_USER_ID
+
+
+def load_user_records(kind: str, user_id: str | None) -> list[dict]:
+    return [item for item in load_records(kind) if record_belongs_to_user(item, user_id)]
+
+
+def load_latest_user_record(kind: str, user_id: str | None) -> dict | None:
+    records = sorted(load_user_records(kind, user_id), key=_record_time_key, reverse=True)
+    return records[0] if records else None
+
+
+def get_user_resources(user_id: str | None = None) -> list[Resource]:
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        return resources
+    if resolved_user_id in resources_by_user:
+        return resources_by_user[resolved_user_id]
+
+    latest_set = load_latest_user_record("resource_set", resolved_user_id)
+    if latest_set:
+        loaded = [normalize_resource(Resource(**item)) for item in latest_set.get("resources", [])]
+        resources_by_user[resolved_user_id] = loaded
+        return loaded
+
+    latest_by_type: dict[str, dict] = {}
+    for item in load_user_records("resource", resolved_user_id):
+        latest_by_type[item.get("type", item.get("id", ""))] = item
+    loaded = [normalize_resource(Resource(**item)) for item in latest_by_type.values()]
+    resources_by_user[resolved_user_id] = loaded
+    return loaded
+
+
+def set_user_resources(user_id: str | None, next_resources: list[Resource]) -> list[Resource]:
+    resolved_user_id = normalize_user_id(user_id)
+    normalized = [normalize_resource(resource) for resource in next_resources]
+    if resolved_user_id == DEFAULT_USER_ID:
+        resources[:] = normalized
+    else:
+        resources_by_user[resolved_user_id] = normalized
+    save_record(
+        "resource_set",
+        scoped_record_id(resolved_user_id, f"resource_set_{uuid4().hex[:8]}"),
+        with_user_payload({"resources": [resource.model_dump() for resource in normalized], "updated_at": now()}, resolved_user_id),
+    )
+    for resource in normalized:
+        save_record("resource", scoped_record_id(resolved_user_id, resource.id), with_user_payload(resource.model_dump(), resolved_user_id))
+    return normalized
+
+
+def get_user_learning_path(user_id: str | None = None) -> LearningPath | None:
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        return learning_path
+    if resolved_user_id in learning_paths_by_user:
+        return learning_paths_by_user[resolved_user_id]
+    latest_path = load_latest_user_record("path", resolved_user_id)
+    if latest_path:
+        path = LearningPath(**latest_path)
+        learning_paths_by_user[resolved_user_id] = path
+        return path
+    return None
+
+
+def set_user_learning_path(user_id: str | None, path: LearningPath) -> LearningPath:
+    global learning_path
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        learning_path = path
+    else:
+        learning_paths_by_user[resolved_user_id] = path
+    save_record("path", scoped_record_id(resolved_user_id, path.id), with_user_payload(path.model_dump(), resolved_user_id))
+    return path
+
+
+def clear_learning_path_for_user(user_id: str | None = None) -> None:
+    global learning_path
+
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        learning_path = None
+    else:
+        learning_paths_by_user.pop(resolved_user_id, None)
+    path_record_ids = [
+        record_id
+        for record_id, item in load_records_with_ids("path")
+        if record_belongs_to_user(item, resolved_user_id)
+    ]
+    if path_record_ids:
+        delete_records("path", path_record_ids)
+
+
+def get_user_assessment_report(user_id: str | None = None) -> AssessmentReport | None:
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        return assessment_report
+    if resolved_user_id in assessment_reports_by_user:
+        return assessment_reports_by_user[resolved_user_id]
+    latest_report = load_latest_user_record("assessment", resolved_user_id)
+    if latest_report:
+        report = AssessmentReport(**latest_report)
+        assessment_reports_by_user[resolved_user_id] = report
+        return report
+    return None
+
+
+def set_user_assessment_report(user_id: str | None, report: AssessmentReport) -> AssessmentReport:
+    global assessment_report
+    resolved_user_id = normalize_user_id(user_id)
+    if resolved_user_id == DEFAULT_USER_ID:
+        assessment_report = report
+    else:
+        assessment_reports_by_user[resolved_user_id] = report
+    save_record("assessment", scoped_record_id(resolved_user_id, report.id), with_user_payload(report.model_dump(), resolved_user_id))
+    return report
 
 
 def get_profile(user_id: str | None = None) -> Profile:
@@ -412,7 +614,40 @@ def set_profile_for_user(user_id: str | None, next_profile: Profile) -> None:
         profile = next_profile
     else:
         profiles[resolved_user_id] = next_profile
-    save_record("profile", resolved_user_id, next_profile.model_dump())
+    save_record("profile", scoped_record_id(resolved_user_id, resolved_user_id), with_user_payload(next_profile.model_dump(), resolved_user_id))
+
+
+def clear_profile_for_user(user_id: str | None = None) -> Profile:
+    global profile
+
+    resolved_user_id = normalize_user_id(user_id)
+    cleared_profile = Profile(id=resolved_user_id, updated_at=now())
+    if resolved_user_id == DEFAULT_USER_ID:
+        profile = cleared_profile
+    else:
+        profiles[resolved_user_id] = cleared_profile
+
+    profile_record_ids = [
+        scoped_record_id(resolved_user_id, resolved_user_id),
+        resolved_user_id,
+    ]
+    profile_version_ids = [
+        record_id
+        for record_id, item in load_records_with_ids("profile_version")
+        if item.get("id") == resolved_user_id or item.get("user_id") == resolved_user_id
+    ]
+    profile_change_ids = [
+        record_id
+        for record_id, item in load_records_with_ids("profile_change")
+        if item.get("profile_id") == resolved_user_id or item.get("user_id") == resolved_user_id
+    ]
+    delete_records("profile", profile_record_ids)
+    if profile_version_ids:
+        delete_records("profile_version", profile_version_ids)
+    if profile_change_ids:
+        delete_records("profile_change", profile_change_ids)
+    clear_learning_path_for_user(resolved_user_id)
+    return cleared_profile
 
 
 def update_profile_from_message(message: str, user_id: str | None = None):
@@ -426,6 +661,11 @@ def update_profile_from_message(message: str, user_id: str | None = None):
 
     extraction_result = profile_agent.extract(message, current_profile)
     extracted = extraction_result.get("extracted", {})
+    turn_profile = profile_agent.turn_snapshot_from_extraction(
+        extracted,
+        latest_message=message,
+        base_profile=current_profile,
+    )
 
     fused_profile, conflicts, fusion_reason = profile_agent.fuse(
         current_profile,
@@ -446,7 +686,7 @@ def update_profile_from_message(message: str, user_id: str | None = None):
         fused_profile.current_chapter = chapter_match["chapter"]["title"]
 
     set_profile_for_user(resolved_user_id, fused_profile)
-    save_record("profile_version", f"{resolved_user_id}_v{fused_profile.version}", fused_profile.model_dump())
+    save_record("profile_version", scoped_record_id(resolved_user_id, f"profile_v{fused_profile.version}"), with_user_payload(fused_profile.model_dump(), resolved_user_id))
     after = fused_profile.model_dump()
 
     changes = {}
@@ -469,10 +709,12 @@ def update_profile_from_message(message: str, user_id: str | None = None):
         "profile_change",
         f"{resolved_user_id}_profile_change_{uuid4().hex[:10]}",
         {
+            "user_id": resolved_user_id,
             "profile_id": resolved_user_id,
             "version": fused_profile.version,
             "trigger_message": message,
             "extracted": extracted,
+            "turn_profile": turn_profile.model_dump(),
             "conflicts": conflicts,
             "fusion_reason": fusion_reason,
             "fusion_meta": fusion_meta,
@@ -485,6 +727,7 @@ def update_profile_from_message(message: str, user_id: str | None = None):
 
     return {
         "extracted": extracted,
+        "turn_profile": turn_profile.model_dump(),
         "confidence": extraction_result.get("confidence", 0.5),
         "source": extraction_result.get("source", "fallback"),
         "reasoning": extraction_result.get("reasoning", ""),
@@ -507,11 +750,12 @@ def add_profile_weak_point(topic: str, evidence: str = "", user_id: str | None =
         current_profile.version += 1
         current_profile.updated_at = now()
         set_profile_for_user(resolved_user_id, current_profile)
-        save_record("profile_version", f"{resolved_user_id}_v{current_profile.version}", current_profile.model_dump())
+        save_record("profile_version", scoped_record_id(resolved_user_id, f"profile_v{current_profile.version}"), with_user_payload(current_profile.model_dump(), resolved_user_id))
         save_record(
             "profile_change",
-            f"{resolved_user_id}_tutor_weak_point_{uuid4().hex[:10]}",
+            scoped_record_id(resolved_user_id, f"tutor_weak_point_{uuid4().hex[:10]}"),
             {
+                "user_id": resolved_user_id,
                 "profile_id": resolved_user_id,
                 "version": current_profile.version,
                 "trigger_message": evidence or f"confirm_weak_point:{normalized_topic}",
@@ -585,11 +829,12 @@ def evaluate_tutor_exercise(exercise: dict, answer: str, user_id: str | None = N
     current_profile.version += 1
     current_profile.updated_at = now()
     set_profile_for_user(resolved_user_id, current_profile)
-    save_record("profile_version", f"{resolved_user_id}_v{current_profile.version}", current_profile.model_dump())
+    save_record("profile_version", scoped_record_id(resolved_user_id, f"profile_v{current_profile.version}"), with_user_payload(current_profile.model_dump(), resolved_user_id))
     save_record(
         "profile_change",
-        f"{resolved_user_id}_tutor_exercise_{uuid4().hex[:10]}",
+        scoped_record_id(resolved_user_id, f"tutor_exercise_{uuid4().hex[:10]}"),
         {
+            "user_id": resolved_user_id,
             "profile_id": resolved_user_id,
             "version": current_profile.version,
             "trigger_message": f"Tutor 小练习作答：{topic}",
@@ -646,6 +891,7 @@ def evaluate_tutor_exercise(exercise: dict, answer: str, user_id: str | None = N
 
 def run_generation(request: GenerateRequest, user_id: str | None = None) -> GenerationJob:
     global active_generation_job_id
+    resolved_user_id = normalize_user_id(user_id)
     active_profile = get_profile(user_id)
     request, intent_warnings = resolve_generation_request(request, active_profile)
     job = GenerationJob(
@@ -658,7 +904,10 @@ def run_generation(request: GenerateRequest, user_id: str | None = None) -> Gene
     )
     jobs[job.id] = job
     job_profiles[job.id] = active_profile.model_copy(deep=True)
-    active_generation_job_id = job.id
+    job_user_ids[job.id] = resolved_user_id
+    active_generation_job_ids[resolved_user_id] = job.id
+    if resolved_user_id == DEFAULT_USER_ID:
+        active_generation_job_id = job.id
     event(job, "job_queued", {"job_id": job.id})
     event(
         job,
@@ -676,10 +925,12 @@ def run_generation(request: GenerateRequest, user_id: str | None = None) -> Gene
 
 def start_generation(request: GenerateRequest, user_id: str | None = None) -> GenerationJob:
     global active_generation_job_id
+    resolved_user_id = normalize_user_id(user_id)
     active_profile = get_profile(user_id)
     request, intent_warnings = resolve_generation_request(request, active_profile)
     with generation_lock:
-        active_job = get_job(active_generation_job_id) if active_generation_job_id else None
+        active_id = active_generation_job_ids.get(resolved_user_id) or (active_generation_job_id if resolved_user_id == DEFAULT_USER_ID else None)
+        active_job = get_job(active_id) if active_id else None
         if active_job and active_job.status in {"queued", "running"}:
             event(active_job, "job_reused", {"job_id": active_job.id, "reason": "已有资源生成任务正在运行，连续点击已复用当前任务。"})
             persist_job(active_job)
@@ -695,7 +946,10 @@ def start_generation(request: GenerateRequest, user_id: str | None = None) -> Ge
     )
     jobs[job.id] = job
     job_profiles[job.id] = active_profile.model_copy(deep=True)
-    active_generation_job_id = job.id
+    job_user_ids[job.id] = resolved_user_id
+    active_generation_job_ids[resolved_user_id] = job.id
+    if resolved_user_id == DEFAULT_USER_ID:
+        active_generation_job_id = job.id
     event(job, "job_queued", {"job_id": job.id})
     event(
         job,
@@ -753,6 +1007,7 @@ def ensure_required_generation_traces(job: GenerationJob) -> list[str]:
 
 def execute_generation_job(job: GenerationJob) -> GenerationJob:
     global active_generation_job_id
+    resolved_user_id = job_user_ids.get(job.id, DEFAULT_USER_ID)
     request = job.request
     active_profile = job_profiles.get(job.id, profile)
 
@@ -793,7 +1048,7 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
     if missing_stages:
         event(job, "trace_completed", {"added": missing_stages})
 
-    is_latest_job = active_generation_job_id == job.id
+    is_latest_job = active_generation_job_ids.get(resolved_user_id) == job.id or (resolved_user_id == DEFAULT_USER_ID and active_generation_job_id == job.id)
     if not is_latest_job:
         job.status = "completed"
         job.progress = 100
@@ -807,13 +1062,10 @@ def execute_generation_job(job: GenerationJob) -> GenerationJob:
     job.progress = 100
     job.current_step = "job_completed"
     job.completed_at = now()
-    resources[:] = [normalize_resource(resource) for resource in job.resources]
+    set_user_resources(resolved_user_id, [normalize_resource(resource) for resource in job.resources])
     event(job, "job_completed", {"resources": len(job.resources), "traces": len(job.traces)})
     persist_job(job)
-    delete_records("resource")
-    for resource in resources:
-        save_record("resource", resource.id, resource.model_dump())
-    generate_learning_path("资源生成完成，基于新资源创建路径", active_profile=active_profile)
+    generate_learning_path("资源生成完成，基于新资源创建路径", active_profile=active_profile, user_id=resolved_user_id)
     return job
 
 
@@ -821,11 +1073,13 @@ def generate_learning_path(
     reason: str = "基于当前画像生成路径",
     assessment_context: dict | None = None,
     active_profile: Profile | None = None,
+    user_id: str | None = None,
 ) -> LearningPath:
-    global learning_path
-    
+    resolved_user_id = normalize_user_id(user_id or (active_profile.id if active_profile else DEFAULT_USER_ID))
     planner = PathPlanner()
     planning_profile = active_profile or profile
+    current_resources = get_user_resources(resolved_user_id)
+    current_assessment = get_user_assessment_report(resolved_user_id)
     
     resources_list = [
         {
@@ -837,12 +1091,12 @@ def generate_learning_path(
             "estimated_time_minutes": 30,
             "feedback_action": r.user_feedback,
         }
-        for r in resources
+        for r in current_resources
         if r.user_feedback != "hidden"
     ]
     
-    if assessment_context is None and assessment_report is not None:
-        assessment_context = assessment_report.model_dump()
+    if assessment_context is None and current_assessment is not None:
+        assessment_context = current_assessment.model_dump()
 
     result = planner.plan(planning_profile, resources_list, assessment_context)
     
@@ -894,7 +1148,7 @@ def generate_learning_path(
                 )
             )
     
-    learning_path = LearningPath(
+    path = LearningPath(
         id=path_data.get("id", f"path_{uuid4().hex[:8]}"),
         profile_version=path_data.get("profile_version", planning_profile.version),
         mastery=path_data.get("mastery", planning_profile.mastery),
@@ -902,8 +1156,7 @@ def generate_learning_path(
         updated_at=now(),
         steps=steps,
     )
-    save_record("path", learning_path.id, learning_path.model_dump())
-    return learning_path
+    return set_user_learning_path(resolved_user_id, path)
 
 
 def learning_path_has_missing_resources(path: LearningPath | None = None) -> bool:
@@ -925,8 +1178,8 @@ def get_or_create_learning_path(reason: str = "初始化演示学习路径") -> 
     return learning_path
 
 
-def get_resource(resource_id: str):
-    return next((resource for resource in resources if resource.id == resource_id), None)
+def get_resource(resource_id: str, user_id: str | None = None):
+    return next((resource for resource in get_user_resources(user_id) if resource.id == resource_id), None)
 
 
 def submit_resource_feedback(payload: ResourceFeedbackRequest):
@@ -1049,6 +1302,147 @@ def get_or_create_assessment_report() -> AssessmentReport:
     )
     save_record("assessment", assessment_report.id, assessment_report.model_dump())
     return assessment_report
+
+
+def get_or_create_user_learning_path(user_id: str | None = None, reason: str = "初始化学习路径") -> LearningPath:
+    resolved_user_id = normalize_user_id(user_id)
+    current_path = get_user_learning_path(resolved_user_id)
+    valid_ids = {resource.id for resource in get_user_resources(resolved_user_id) if resource.user_feedback != "hidden"}
+    referenced_ids = [
+        resource_id
+        for step in current_path.steps
+        for resource_id in step.recommended_resource_ids
+    ] if current_path else []
+    has_missing_resources = any(resource_id not in valid_ids for resource_id in referenced_ids)
+    if current_path is None or has_missing_resources:
+        return generate_learning_path(reason, active_profile=get_profile(resolved_user_id), user_id=resolved_user_id)
+    return current_path
+
+
+def submit_resource_feedback_for_user(payload: ResourceFeedbackRequest, user_id: str | None = None):
+    resolved_user_id = normalize_user_id(user_id)
+    user_resources = get_user_resources(resolved_user_id)
+    resource = next((item for item in user_resources if item.id == payload.resource_id), None)
+    if resource is None:
+        return None
+    resource.user_feedback = payload.action
+    set_user_resources(resolved_user_id, user_resources)
+    generate_learning_path(
+        f"收到资源反馈：{resource.title} -> {payload.action}",
+        active_profile=get_profile(resolved_user_id),
+        user_id=resolved_user_id,
+    )
+    return resource
+
+
+def submit_quiz_for_user(payload: QuizSubmitRequest, user_id: str | None = None) -> AssessmentReport:
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
+    user_resources = get_user_resources(resolved_user_id)
+    quiz_answers = []
+    for idx, answer in enumerate(payload.answers, start=1):
+        student_answer = answer.split("回答：", 1)[-1].strip()
+        normalized_answer = student_answer.lower()
+        is_correct = any(
+            keyword in normalized_answer
+            for keyword in ["过拟合", "泛化", "训练", "测试", "新数据", "评估", "指标", "overfit", "generalization"]
+        )
+        quiz_answers.append(
+            {
+                "question_id": f"submitted_{idx:02d}",
+                "type": "short_answer",
+                "question": answer.split("回答：", 1)[0].replace("题目：", "").strip() if "回答：" in answer else "",
+                "student_answer": student_answer,
+                "correct_answer": "",
+                "is_correct": is_correct,
+                "explanation": "学生主观题作答，由 AssessmentAgent 结合内容质量评估。",
+            }
+        )
+
+    assessment_result = AssessmentAgent().assess(
+        quiz_answers,
+        current_profile,
+        resource_usage=[
+            {
+                "resource_id": resource.id,
+                "resource_type": resource.type,
+                "completed": resource.user_feedback != "hidden",
+            }
+            for resource in user_resources
+        ],
+    )
+    assessment = assessment_result.get("assessment", {})
+    mastery = assessment.get("knowledge_mastery", {})
+    raw_score = mastery.get("score", 0.68)
+    score = int(round(raw_score * 100)) if isinstance(raw_score, float) and raw_score <= 1 else int(raw_score or 68)
+    score = max(0, min(100, score))
+    delta = float(assessment_result.get("mastery_delta", 0.04))
+    current_profile.mastery = max(0.0, min(0.95, current_profile.mastery + delta))
+    for item in assessment.get("weak_points", []):
+        weak_point = item.get("topic", str(item)) if isinstance(item, dict) else str(item)
+        if weak_point and weak_point not in current_profile.weak_points:
+            current_profile.weak_points.append(weak_point)
+    cognitive = assessment.get("cognitive_level", {})
+    current_profile.mistake_patterns = [
+        cognitive.get("description") or cognitive.get("level") or "根据本次练习识别出的迁移不足"
+    ]
+    current_profile.version += 1
+    current_profile.updated_at = now()
+    set_profile_for_user(resolved_user_id, current_profile)
+
+    adjusted = generate_learning_path(
+        "根据练习提交结果调整：加强评价指标与迁移练习",
+        {
+            "score": score,
+            "mastery_delta": delta,
+            "weak_points": current_profile.weak_points,
+            "mistake_patterns": current_profile.mistake_patterns,
+        },
+        current_profile,
+        resolved_user_id,
+    )
+    report = AssessmentReport(
+        id=f"assess_{uuid4().hex[:8]}",
+        score=score,
+        mastery_delta=delta,
+        strengths=assessment.get("strengths", []) or ["已完成本次练习提交"],
+        weak_points=current_profile.weak_points,
+        mistake_patterns=current_profile.mistake_patterns,
+        feedback=(
+            f"本次评估依据你的真实作答生成。下一步建议：{'；'.join(assessment_result.get('next_learning_objectives', []))}"
+            if assessment_result.get("next_learning_objectives")
+            else assessment_result.get("reasoning")
+            or mastery.get("details", "已根据本次练习提交生成评估。")
+        ),
+        adjusted_path=adjusted,
+        created_at=now(),
+    )
+    return set_user_assessment_report(resolved_user_id, report)
+
+
+def get_or_create_user_assessment_report(user_id: str | None = None) -> AssessmentReport:
+    resolved_user_id = normalize_user_id(user_id)
+    current_report = get_user_assessment_report(resolved_user_id)
+    if current_report is not None:
+        return current_report
+    current_profile = get_profile(resolved_user_id)
+    path = get_user_learning_path(resolved_user_id) or generate_learning_path(
+        "初始化演示测评报告所需学习路径",
+        active_profile=current_profile,
+        user_id=resolved_user_id,
+    )
+    report = AssessmentReport(
+        id=f"assess_{uuid4().hex[:8]}",
+        score=int(round(current_profile.mastery * 100)),
+        mastery_delta=0.0,
+        strengths=["暂无正式测评记录，已准备演示默认报告。"],
+        weak_points=current_profile.weak_points,
+        mistake_patterns=current_profile.mistake_patterns,
+        feedback="完成练习提交后，这里会展示真实评估反馈和路径调整结果。",
+        adjusted_path=path,
+        created_at=now(),
+    )
+    return set_user_assessment_report(resolved_user_id, report)
 
 
 def hydrate_from_db():
@@ -1192,6 +1586,7 @@ def chat_and_generate(request: ChatAndGenerateRequest, user_id: str | None = Non
         "learning_path_updated": False,
         "message": "",
         "profile": active_profile.model_dump(),
+        "turn_profile": profile_result.get("turn_profile"),
         "extracted": profile_result.get("extracted", {}),
         "resources": [],
         "learning_path": None,
@@ -1246,7 +1641,7 @@ def regenerate_resources_by_types(
         "reading": ReadingAgent,
         "media_script": MediaAgent,
         "animation_demo": AnimationDemoAgent,
-        "ppt_draft": PPTDraftAgent,
+        "html_ppt": PPTDraftAgent,
         "visual_card": VisualCardAgent,
         "code_case": CodeCaseAgent,
     }
@@ -1354,7 +1749,130 @@ def refresh_quiz_fast() -> Resource:
     return quiz
 
 
-def adjust_resources(request: ResourceAdjustRequest):
+def refresh_quiz_fast_for_user(user_id: str | None = None) -> Resource:
+    resolved_user_id = normalize_user_id(user_id)
+    current_profile = get_profile(resolved_user_id)
+    user_resources = get_user_resources(resolved_user_id)
+    from .knowledge import find_chapter
+
+    chapter = find_chapter(current_profile.current_chapter)
+    question_pool = list(chapter.get("practice_questions", []))
+    if not question_pool:
+        for item in user_resources:
+            if item.type == "quiz":
+                try:
+                    question_pool = json.loads(item.content)
+                except json.JSONDecodeError:
+                    question_pool = []
+                break
+
+    random.shuffle(question_pool)
+    questions = []
+    for index, item in enumerate(question_pool[:5], start=1):
+        questions.append(
+            {
+                "level": item.get("level", "基础" if index <= 2 else "应用"),
+                "difficulty": item.get("difficulty", "基础" if index <= 2 else "应用"),
+                "type": item.get("type", "short_answer"),
+                "question": item.get("question") or item.get("stem") or f"练习题 {index}",
+                "answer": item.get("answer") or item.get("standard_answer", "请结合课程概念作答。"),
+                "explanation": item.get("explanation") or item.get("analysis", "围绕概念边界、适用条件和案例迁移进行分析。"),
+                "assessment_point": item.get("assessment_point", "概念理解与迁移"),
+                "options": item.get("options", []),
+                "rubric": item.get("rubric", ["概念准确", "理由清晰", "能结合场景"]),
+            }
+        )
+
+    quiz = Resource(
+        id=f"res_{uuid4().hex[:8]}",
+        type="quiz",
+        title=f"快速练习题：{chapter['title']}",
+        content_format="json",
+        content=json.dumps(questions, ensure_ascii=False, indent=2),
+        source_refs=[f"{chapter['id']}#practice_questions", f"{chapter['id']}#detailed_concepts"],
+        difficulty="入门到提高",
+        target_profile=[current_profile.cognitive_style, *current_profile.preferred_modalities[:2]],
+        review_status="passed",
+        review_reason="快速刷新：来自课程题库并通过本地结构校验",
+        audit_reason="快速刷新：来自课程题库并通过本地结构校验",
+        review_notes=[f"题目数量：{len(questions)}", "未调用大模型，避免刷新卡顿"],
+        review_confidence=0.9,
+        created_by_agents=["QuizFastRefresh"],
+        created_at=now(),
+    )
+    existing_idx = next((idx for idx, resource in enumerate(user_resources) if resource.type == "quiz"), None)
+    if existing_idx is not None:
+        user_resources[existing_idx] = quiz
+    else:
+        user_resources.append(quiz)
+    set_user_resources(resolved_user_id, user_resources)
+    return quiz
+
+
+def adjust_resources(request: ResourceAdjustRequest, user_id: str | None = None):
+    resolved_user_id = normalize_user_id(user_id)
+    user_resources = get_user_resources(resolved_user_id)
+    active_profile = get_profile(resolved_user_id)
+    result = {
+        "profile_updated": False,
+        "resources_updated": False,
+        "learning_path_updated": False,
+        "message": "",
+        "resources": [],
+        "learning_path": None,
+    }
+    for adjustment in request.adjustments:
+        resource_id = adjustment.get("resource_id")
+        action = adjustment.get("action")
+        resource = next((item for item in user_resources if item.id == resource_id), None)
+        if not resource:
+            continue
+        if action == "update_content":
+            new_content = adjustment.get("content")
+            if new_content:
+                resource.content = new_content
+                resource.review_status = "needs_revision"
+                result["resources_updated"] = True
+                result["resources"].append(resource.model_dump())
+        elif action == "regenerate":
+            new_resources = regenerate_resources_by_types([resource.type], active_profile=active_profile)
+            if new_resources:
+                idx = next((i for i, item in enumerate(user_resources) if item.id == resource_id), None)
+                if idx is not None:
+                    user_resources[idx] = new_resources[0]
+                    result["resources_updated"] = True
+                    result["resources"].append(new_resources[0].model_dump())
+        elif action == "remove":
+            user_resources = [item for item in user_resources if item.id != resource_id]
+            result["resources_updated"] = True
+            result["message"] = f"已移除资源 {resource.title}"
+
+    if result["resources_updated"]:
+        set_user_resources(resolved_user_id, user_resources)
+
+    if request.preferences:
+        for key, value in request.preferences.items():
+            if hasattr(active_profile, key):
+                setattr(active_profile, key, value)
+                active_profile.version += 1
+                active_profile.updated_at = now()
+                result["profile_updated"] = True
+                result["message"] = f"已更新偏好设置 {key}"
+        if result["profile_updated"]:
+            set_profile_for_user(resolved_user_id, active_profile)
+
+    if request.target_concepts:
+        path = generate_learning_path(f"用户指定重点概念：{', '.join(request.target_concepts)}", active_profile=active_profile, user_id=resolved_user_id)
+        result["learning_path_updated"] = True
+        result["learning_path"] = path.model_dump()
+
+    if result["resources_updated"] or result["profile_updated"]:
+        path = generate_learning_path("资源或偏好已更新，重新规划学习路径", active_profile=active_profile, user_id=resolved_user_id)
+        result["learning_path_updated"] = True
+        result["learning_path"] = path.model_dump()
+
+    return result
+
     global resources, learning_path
     
     result = {

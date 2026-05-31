@@ -65,6 +65,8 @@
             <span>资源类型偏好</span>
             <div class="segmented-options">
               <button type="button" :class="{ active: outputMode === 'all' }" :disabled="store.loading" @click="outputMode = 'all'">完整资料包</button>
+              <button type="button" :class="{ active: outputMode === 'ppt' }" :disabled="store.loading" @click="outputMode = 'ppt'">只生成 PPT</button>
+              <button type="button" :class="{ active: outputMode === 'animation' }" :disabled="store.loading" @click="outputMode = 'animation'">只生成动画</button>
               <button type="button" :class="{ active: outputMode === 'lesson' }" :disabled="store.loading" @click="outputMode = 'lesson'">讲解优先</button>
               <button type="button" :class="{ active: outputMode === 'practice' }" :disabled="store.loading" @click="outputMode = 'practice'">练习优先</button>
             </div>
@@ -77,6 +79,8 @@
           :current-step="friendlyGenerationStep"
           :complete="store.resources.length > 0 && !store.loading"
         />
+
+        <AgentGraph :traces="store.traces" :loading="store.loading" />
 
         <section class="panel multimodal-panel">
           <div class="panel-title">
@@ -241,6 +245,7 @@ import resourceGenerationHero from '../assets/resource-generation-hero.png'
 import { useLearningStore } from '../store'
 import type { GenerationHistoryItem, GenerationHistorySummary, Resource } from '../types'
 import GenerationProgress from '../components/GenerationProgress.vue'
+import AgentGraph from '../components/AgentGraph.vue'
 import ResourceCard from '../components/ResourceCard.vue'
 import ResourceContent from '../components/ResourceContent.vue'
 
@@ -264,11 +269,13 @@ const promptTemplates: PromptTemplate[] = [
   { title: '快速复习', prompt: '请生成 10 分钟复习资料，包含重点、常见错误和自测题。' },
   { title: '代码案例', prompt: '请生成可运行的最小代码示例，并解释每一步在做什么。' }
 ]
-const multimodalTypes = ['图文讲解', '思维导图', '互动练习', '拓展阅读', '视频脚本', '动画演示', '代码案例', 'PPT 草稿']
+const multimodalTypes = ['图文讲解', '思维导图', '互动练习', '拓展阅读', '动画演示', '代码案例', 'HTML PPT']
 
 const canSubmit = computed(() => !store.loading && draftPrompt.value.trim().length > 0)
 const primaryActionText = computed(() => store.loading ? '正在生成...' : '开始生成')
 const outputModeLabel = computed(() => {
+  if (outputMode.value === 'ppt') return '只生成 PPT'
+  if (outputMode.value === 'animation') return '只生成动画'
   if (outputMode.value === 'lesson') return '讲解优先'
   if (outputMode.value === 'practice') return '练习优先'
   return '完整资料包'
@@ -329,13 +336,19 @@ async function submitGeneration() {
 }
 
 function selectedResourceTypes() {
+  if (outputMode.value === 'ppt') {
+    return ['html_ppt']
+  }
+  if (outputMode.value === 'animation') {
+    return ['animation_demo']
+  }
   if (outputMode.value === 'lesson') {
     return ['lecture_doc', 'mind_map', 'reading', 'animation_demo']
   }
   if (outputMode.value === 'practice') {
     return ['mind_map', 'quiz', 'visual_card', 'code_case']
   }
-  return []
+  return ['lecture_doc', 'mind_map', 'quiz', 'reading', 'animation_demo', 'code_case', 'html_ppt']
 }
 
 function formatDate(value?: string | null) {
@@ -351,7 +364,7 @@ function typeLabel(type: string) {
     reading: '拓展阅读',
     media_script: '视频脚本',
     animation_demo: '动画演示',
-    ppt_draft: 'PPT 草稿',
+    html_ppt: 'HTML PPT',
     visual_card: '学习卡片',
     code_case: '代码案例'
   }

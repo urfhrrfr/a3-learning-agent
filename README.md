@@ -102,7 +102,9 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-当前结果：`44 passed`
+当前结果：`62 passed`
+
+提交包说明：项目按源码方式提交，依赖目录不随作品包提交。后端依赖通过 `pip install -r requirements.txt` 安装，前端依赖通过 `npm install` 安装；`.venv`、`node_modules`、日志、缓存、运行时数据库和临时构建目录均不属于提交内容。
 
 前端构建：
 

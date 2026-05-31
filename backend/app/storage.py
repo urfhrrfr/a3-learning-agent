@@ -131,6 +131,23 @@ def load_records(kind: str) -> list[dict[str, Any]]:
     return [json.loads(row[0]) for row in rows]
 
 
+def load_records_with_ids(kind: str) -> list[tuple[str, dict[str, Any]]]:
+    init_db()
+    if not _use_mysql():
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT id, payload FROM records WHERE kind = ?", (kind,)).fetchall()
+        return [(row[0], json.loads(row[1])) for row in rows]
+
+    with _mysql_connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, payload FROM records WHERE kind = %s ORDER BY updated_at ASC, row_pk ASC",
+                (kind,),
+            )
+            rows = cursor.fetchall()
+    return [(row[0], json.loads(row[1])) for row in rows]
+
+
 def load_latest_record(kind: str) -> dict[str, Any] | None:
     init_db()
     if not _use_mysql():

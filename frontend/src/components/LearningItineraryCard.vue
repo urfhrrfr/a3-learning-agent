@@ -80,7 +80,7 @@ const resourceLabels: Record<string, string> = {
   reading: '拓展阅读',
   media_script: '视频/分镜脚本',
   animation_demo: '教学动画',
-  ppt_draft: 'PPT 草稿',
+  html_ppt: 'HTML PPT',
   visual_card: '可视化学习卡片',
   code_case: '代码实操案例'
 }

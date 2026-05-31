@@ -113,14 +113,13 @@
         <span class="status pending">{{ historicalGenerations.length }} 个资料包</span>
       </div>
       <div v-if="historicalGenerations.length" class="history-package-stack" :class="{ expanded: historyExpanded }">
-        <button
+        <div
           v-for="job in visibleHistoryGenerations"
           :key="job.id"
           class="history-package-row"
           :class="{ active: selectedHistoryJob?.id === job.id || store.historyDetailLoadingId === job.id }"
-          type="button"
-          @click="openHistoryJob(job)"
         >
+          <button class="history-package-main" type="button" @click="openHistoryJob(job)">
           <div class="history-record-head">
             <div>
               <strong>{{ historyTitle(job) }}</strong>
@@ -131,7 +130,19 @@
           <div class="history-type-summary">
             <span v-for="item in job.resource_type_counts.slice(0, 5)" :key="item.type">{{ typeLabel(item.type) }} {{ item.count }}</span>
           </div>
-        </button>
+          </button>
+          <div class="history-package-actions">
+            <span v-if="job.status === 'failed' || job.resource_count === 0" class="danger-note">可删除无效记录</span>
+            <button
+              class="btn ghost danger"
+              type="button"
+              :disabled="deletingHistoryId === job.id"
+              @click.stop="deleteHistoryJob(job)"
+            >
+              {{ deletingHistoryId === job.id ? '删除中' : '删除' }}
+            </button>
+          </div>
+        </div>
       </div>
       <button
         v-if="historicalGenerations.length > collapsedHistoryLimit"
@@ -163,6 +174,7 @@ const selectedHistoryJob = ref<GenerationHistoryItem | null>(null)
 const requestedHistoryJobId = ref('')
 const filter = ref('')
 const historyExpanded = ref(false)
+const deletingHistoryId = ref('')
 const collapsedHistoryLimit = 3
 const resourcesExpanded = ref(false)
 const collapsedResourceLimit = 4
@@ -174,7 +186,7 @@ const typeLabels: Record<string, string> = {
   reading: '拓展阅读',
   media_script: '视频脚本',
   animation_demo: '动画演示',
-  ppt_draft: 'PPT 草稿',
+  html_ppt: 'HTML PPT',
   visual_card: '学习卡片',
   code_case: '代码案例'
 }
@@ -237,6 +249,20 @@ async function openHistoryJob(job: GenerationHistorySummary) {
     selected.value = detail.resources[0] || null
   } catch {
     if (requestedHistoryJobId.value === job.id) returnToCurrentResources()
+  }
+}
+
+async function deleteHistoryJob(job: GenerationHistorySummary) {
+  const confirmed = window.confirm(`确定删除“${historyTitle(job)}”这条历史资料记录吗？`)
+  if (!confirmed) return
+  deletingHistoryId.value = job.id
+  try {
+    await store.deleteResourceHistory(job.id)
+    if (requestedHistoryJobId.value === job.id || selectedHistoryJob.value?.id === job.id) {
+      returnToCurrentResources()
+    }
+  } finally {
+    if (deletingHistoryId.value === job.id) deletingHistoryId.value = ''
   }
 }
 

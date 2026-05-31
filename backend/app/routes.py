@@ -6,13 +6,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from . import state
+from .auth import auth_status, authenticate_user, create_access_token, create_user, current_user, public_user, verify_access_token
 from .cache import status as cache_status
 from .knowledge import COURSE, find_chapter, question_bank
 from .storage import load_records, status as storage_status
 from .providers.base import LLMProviderError
 from .providers.factory import get_llm_provider
 from .retrieval import HybridRetriever, save_retrieval_log
-from .schemas import ChatAndGenerateRequest, GenerateRequest, ProfileChatRequest, QuizSubmitRequest, ResourceAdjustRequest, ResourceFeedbackRequest, TutorExerciseSubmitRequest, TutorRequest, WeakPointConfirmRequest
+from .schemas import AuthLoginRequest, AuthRegisterRequest, ChatAndGenerateRequest, GenerateRequest, ProfileChatRequest, QuizSubmitRequest, ResourceAdjustRequest, ResourceFeedbackRequest, TutorExerciseSubmitRequest, TutorRequest, WeakPointConfirmRequest
 from .path_planner import PathPlanner, LearningProgress
 from .vector_store import vector_store_status
 
@@ -127,16 +128,17 @@ def _build_tutor_exercise(topic: str, preferred_mode: str, resource_id: str | No
     }
 
 
-def _build_next_step(active_profile, topic: str) -> dict:
-    if state.learning_path and state.learning_path.steps:
+def _build_next_step(active_profile, topic: str, learning_path=None) -> dict:
+    active_path = learning_path
+    if active_path and active_path.steps:
         matching_step = next(
             (
-                step for step in state.learning_path.steps
+                step for step in active_path.steps
                 if step.status != "done" and (topic in step.title or topic in step.objective or topic in step.reason)
             ),
             None,
         )
-        step = matching_step or next((item for item in state.learning_path.steps if item.status != "done"), state.learning_path.steps[0])
+        step = matching_step or next((item for item in active_path.steps if item.status != "done"), active_path.steps[0])
         return {
             "title": step.title,
             "objective": step.objective,
@@ -196,6 +198,34 @@ def request_user_id(x_user_id: str | None = Header(default=None, alias="X-User-I
     return state.normalize_user_id(x_user_id)
 
 
+def authenticated_user_id(user: dict = Depends(current_user)) -> str:
+    return state.normalize_user_id(user["id"])
+
+
+@router.get("/auth/status")
+def auth_status_route():
+    return ok(auth_status())
+
+
+@router.post("/auth/register")
+def auth_register(payload: AuthRegisterRequest):
+    user = create_user(payload.username, payload.password, payload.display_name)
+    return ok({"token": create_access_token(user), "user": public_user(user), **auth_status()})
+
+
+@router.post("/auth/login")
+def auth_login(payload: AuthLoginRequest):
+    user = authenticate_user(payload.username, payload.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    return ok({"token": create_access_token(user), "user": public_user(user), **auth_status()})
+
+
+@router.get("/auth/me")
+def auth_me(user: dict = Depends(current_user)):
+    return ok({"user": public_user(user), **auth_status()})
+
+
 @router.get("/health")
 def health():
     provider = get_llm_provider()
@@ -213,7 +243,7 @@ def health():
 
 
 @router.post("/profile/chat")
-def profile_chat(payload: ProfileChatRequest, user_id: str = Depends(request_user_id)):
+def profile_chat(payload: ProfileChatRequest, user_id: str = Depends(authenticated_user_id)):
     update_result = state.update_profile_from_message(payload.message, user_id)
     current_profile = state.get_profile(user_id)
     suggested_questions = [
@@ -225,6 +255,7 @@ def profile_chat(payload: ProfileChatRequest, user_id: str = Depends(request_use
     return ok(
         {
             "profile": current_profile.model_dump(),
+            "turn_profile": update_result.get("turn_profile"),
             "extracted": update_result.get("extracted", {}),
             "confidence": update_result.get("confidence", 0.5),
             "source": update_result.get("source", "fallback"),
@@ -241,17 +272,23 @@ def profile_chat(payload: ProfileChatRequest, user_id: str = Depends(request_use
 
 
 @router.get("/profile/current")
-def profile_current(user_id: str = Depends(request_user_id)):
+def profile_current(user_id: str = Depends(authenticated_user_id)):
     return ok(state.get_profile(user_id).model_dump())
 
 
+@router.delete("/profile/current")
+def profile_clear(user_id: str = Depends(authenticated_user_id)):
+    cleared_profile = state.clear_profile_for_user(user_id)
+    return ok({"deleted": True, "profile": cleared_profile.model_dump(), "learning_path": None})
+
+
 @router.get("/profile/versions")
-def profile_versions(user_id: str = Depends(request_user_id)):
+def profile_versions(user_id: str = Depends(authenticated_user_id)):
     return ok(state.profile_versions(user_id))
 
 
 @router.post("/profile/rollback/{version}")
-def profile_rollback(version: int, user_id: str = Depends(request_user_id)):
+def profile_rollback(version: int, user_id: str = Depends(authenticated_user_id)):
     result = state.rollback_profile_version(version, user_id)
     if result is None:
         raise HTTPException(status_code=404, detail="profile version not found")
@@ -264,41 +301,41 @@ def profile_dimensions():
 
 
 @router.get("/profile/change-log")
-def profile_change_log(user_id: str = Depends(request_user_id)):
+def profile_change_log(user_id: str = Depends(authenticated_user_id)):
     return ok(state.profile_change_log(user_id))
 
 
 @router.post("/profile/chat-and-generate")
-def profile_chat_and_generate(payload: ChatAndGenerateRequest, user_id: str = Depends(request_user_id)):
+def profile_chat_and_generate(payload: ChatAndGenerateRequest, user_id: str = Depends(authenticated_user_id)):
     result = state.chat_and_generate(payload, user_id)
     return ok(result)
 
 
 @router.post("/profile/weak-points/confirm")
-def profile_confirm_weak_point(payload: WeakPointConfirmRequest, user_id: str = Depends(request_user_id)):
+def profile_confirm_weak_point(payload: WeakPointConfirmRequest, user_id: str = Depends(authenticated_user_id)):
     return ok(state.add_profile_weak_point(payload.topic, payload.evidence, user_id))
 
 
 @router.post("/resources/adjust")
-def resources_adjust(payload: ResourceAdjustRequest):
-    result = state.adjust_resources(payload)
+def resources_adjust(payload: ResourceAdjustRequest, user_id: str = Depends(authenticated_user_id)):
+    result = state.adjust_resources(payload, user_id)
     return ok(result)
 
 
 @router.post("/resources/generate")
-def resources_generate(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+def resources_generate(payload: GenerateRequest, user_id: str = Depends(authenticated_user_id)):
     job = state.run_generation(payload, user_id)
     return ok(job.model_dump())
 
 
 @router.post("/resources/generate/background")
-def resources_generate_background(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+def resources_generate_background(payload: GenerateRequest, user_id: str = Depends(authenticated_user_id)):
     job = state.start_generation(payload, user_id)
     return ok(job.model_dump())
 
 
 @router.post("/resources/generate/stream")
-def resources_generate_stream(payload: GenerateRequest, user_id: str = Depends(request_user_id)):
+def resources_generate_stream(payload: GenerateRequest, user_id: str = Depends(authenticated_user_id)):
     job = state.start_generation(payload, user_id)
     
     def generate():
@@ -343,17 +380,18 @@ def resources_generate_stream(payload: GenerateRequest, user_id: str = Depends(r
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, user_id: str = Depends(authenticated_user_id)):
     job = state.get_job(job_id)
-    if not job:
+    if not job or state.job_user_ids.get(job.id, state.DEFAULT_USER_ID) != user_id:
         raise HTTPException(status_code=404, detail="job not found")
     return ok(job.model_dump())
 
 
 @router.get("/jobs/{job_id}/events")
-async def job_events(job_id: str):
+async def job_events(job_id: str, access_token: str = ""):
+    user_id = state.normalize_user_id(verify_access_token(access_token)["id"])
     job = state.get_job(job_id)
-    if not job:
+    if not job or state.job_user_ids.get(job.id, state.DEFAULT_USER_ID) != user_id:
         raise HTTPException(status_code=404, detail="job not found")
 
     async def generate():
@@ -384,71 +422,94 @@ async def job_events(job_id: str):
 
 
 @router.get("/resources")
-def list_resources():
-    return ok([state.normalize_resource(resource).model_dump() for resource in state.resources])
+def list_resources(user_id: str = Depends(authenticated_user_id)):
+    return ok([state.normalize_resource(resource).model_dump() for resource in state.get_user_resources(user_id)])
 
 
 @router.get("/resources/history")
-def resources_history(limit: int = 20):
-    return ok(state.generation_history(limit))
+def resources_history(limit: int = 20, user_id: str = Depends(authenticated_user_id)):
+    return ok(state.generation_history(limit, user_id))
 
 
 @router.get("/resources/history/{job_id}")
-def resources_history_detail(job_id: str):
-    job = state.generation_history_detail(job_id)
+def resources_history_detail(job_id: str, user_id: str = Depends(authenticated_user_id)):
+    job = state.generation_history_detail(job_id, user_id)
     if job:
         return ok(job)
     raise HTTPException(status_code=404, detail="history job not found")
 
 
+@router.delete("/resources/history/{job_id}")
+def resources_history_delete(job_id: str, user_id: str = Depends(authenticated_user_id)):
+    if state.delete_generation_history_job(job_id, user_id):
+        return ok({"deleted": True, "job_id": job_id})
+    raise HTTPException(status_code=404, detail="history job not found")
+
+
 @router.get("/resources/{resource_id}")
-def get_resource(resource_id: str):
-    resource = state.get_resource(resource_id)
+def get_resource(resource_id: str, user_id: str = Depends(authenticated_user_id)):
+    resource = state.get_resource(resource_id, user_id)
     if resource:
         return ok(state.normalize_resource(resource).model_dump())
     raise HTTPException(status_code=404, detail="resource not found")
 
 
 @router.post("/resources/feedback")
-def resource_feedback(payload: ResourceFeedbackRequest):
-    resource = state.submit_resource_feedback(payload)
+def resource_feedback(payload: ResourceFeedbackRequest, user_id: str = Depends(authenticated_user_id)):
+    resource = state.submit_resource_feedback_for_user(payload, user_id)
     if resource:
-        return ok({"resource": resource.model_dump(), "learning_path": state.learning_path.model_dump() if state.learning_path else None})
+        path = state.get_user_learning_path(user_id)
+        return ok({"resource": resource.model_dump(), "learning_path": path.model_dump() if path else None})
     raise HTTPException(status_code=404, detail="resource not found")
 
 
 @router.post("/learning-path/generate")
-def learning_path_generate():
-    return ok(state.generate_learning_path().model_dump())
+def learning_path_generate(user_id: str = Depends(authenticated_user_id)):
+    return ok(state.generate_learning_path(active_profile=state.get_profile(user_id), user_id=user_id).model_dump())
 
 
 @router.get("/learning-path/current")
-def learning_path_current():
-    path = state.get_or_create_learning_path("初始化或修复演示学习路径")
+def learning_path_current(user_id: str = Depends(authenticated_user_id)):
+    path = state.get_user_learning_path(user_id)
+    active_profile = state.get_profile(user_id)
+    has_profile_signal = any([
+        active_profile.learning_goal,
+        active_profile.weak_points,
+        active_profile.preferred_modalities,
+        active_profile.knowledge_base,
+    ])
+    if path is not None:
+        path = state.get_or_create_user_learning_path(user_id, "初始化或修复演示学习路径")
+    elif has_profile_signal:
+        path = state.get_or_create_user_learning_path(user_id, "初始化或修复演示学习路径")
+    else:
+        return ok(None)
     return ok(path.model_dump())
 
 
 @router.get("/learning-path/history")
-def learning_path_history(limit: int = 20):
-    return ok(state.learning_path_history(limit))
+def learning_path_history(limit: int = 20, user_id: str = Depends(authenticated_user_id)):
+    return ok(state.learning_path_history(limit, user_id))
 
 
 @router.post("/learning-path/feedback")
-def learning_path_feedback():
-    return ok(state.generate_learning_path("收到反馈后缩短概念复习、增加代码迁移").model_dump())
+def learning_path_feedback(user_id: str = Depends(authenticated_user_id)):
+    return ok(state.generate_learning_path("收到反馈后缩短概念复习、增加代码迁移", active_profile=state.get_profile(user_id), user_id=user_id).model_dump())
 
 
 @router.post("/learning-path/adjust")
-def learning_path_adjust():
+def learning_path_adjust(user_id: str = Depends(authenticated_user_id)):
     planner = PathPlanner()
+    active_profile = state.get_profile(user_id)
+    current_learning_path = state.get_user_learning_path(user_id)
     
-    current_path = state.learning_path.model_dump() if state.learning_path else {}
+    current_path = current_learning_path.model_dump() if current_learning_path else {}
     if not current_path:
         current_path = {
             "id": "path_default",
             "profile_version": 1,
-            "mastery": state.profile.mastery,
-            "overall_goal": state.profile.learning_goal,
+            "mastery": active_profile.mastery,
+            "overall_goal": active_profile.learning_goal,
             "adjustment_reason": "",
             "steps": []
         }
@@ -462,16 +523,17 @@ def learning_path_adjust():
             }
         }
     
-    result = planner.adjust(current_path, assessment, state.profile)
+    result = planner.adjust(current_path, assessment, active_profile)
     return ok(result)
 
 
 @router.post("/learning-path/prioritize")
-def learning_path_prioritize():
+def learning_path_prioritize(user_id: str = Depends(authenticated_user_id)):
     planner = PathPlanner()
+    active_profile = state.get_profile(user_id)
     
     resources = []
-    for resource in state.resources:
+    for resource in state.get_user_resources(user_id):
         resources.append({
             "id": resource.id,
             "type": resource.type,
@@ -490,13 +552,13 @@ def learning_path_prioritize():
             }
         }
     
-    result = planner.prioritize_resources(state.profile, assessment, resources)
+    result = planner.prioritize_resources(active_profile, assessment, resources)
     return ok(result)
 
 
 @router.get("/learning-path/progress")
-def learning_path_progress():
-    path = state.get_or_create_learning_path("初始化或修复演示学习路径")
+def learning_path_progress(user_id: str = Depends(authenticated_user_id)):
+    path = state.get_or_create_user_learning_path(user_id, "初始化或修复演示学习路径")
     
     progress = LearningProgress(path.id)
     progress.completed_steps = ["step_01"]
@@ -509,11 +571,12 @@ def learning_path_progress():
 
 
 @router.post("/learning-path/progress/update")
-def update_learning_progress(step_id: str = None, resource_id: str = None, completed: bool = False):
-    if state.learning_path is None:
+def update_learning_progress(step_id: str = None, resource_id: str = None, completed: bool = False, user_id: str = Depends(authenticated_user_id)):
+    current_path = state.get_user_learning_path(user_id)
+    if current_path is None:
         return ok({"message": "No learning path found"})
     
-    progress = LearningProgress(state.learning_path.id)
+    progress = LearningProgress(current_path.id)
     
     if step_id:
         progress.mark_step_completed(step_id)
@@ -522,12 +585,12 @@ def update_learning_progress(step_id: str = None, resource_id: str = None, compl
         progress.record_resource_usage(resource_id, 20, completed)
     
     planner = PathPlanner()
-    summary = planner.generate_progress_summary(state.learning_path.model_dump(), progress)
+    summary = planner.generate_progress_summary(current_path.model_dump(), progress)
     return ok(summary)
 
 
 @router.post("/tutor/chat")
-def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
+def tutor_chat(payload: TutorRequest, user_id: str = Depends(authenticated_user_id)):
     active_profile = state.get_profile(user_id)
     profile_suggestion = _detect_tutor_weak_point(payload.question, active_profile)
     preferred_mode = _preferred_tutor_mode(active_profile)
@@ -556,8 +619,9 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
         warnings=rag_warnings,
     )
     rag_context = _format_rag_sources(rag_sources)
-    selected_resource = state.get_resource(payload.resource_id) if payload.resource_id else None
-    context_resources = [selected_resource] if selected_resource else state.resources[:3]
+    user_resources = state.get_user_resources(user_id)
+    selected_resource = state.get_resource(payload.resource_id, user_id) if payload.resource_id else None
+    context_resources = [selected_resource] if selected_resource else user_resources[:3]
     cited_resources = [
         {
             "id": resource.id,
@@ -645,36 +709,36 @@ def tutor_chat(payload: TutorRequest, user_id: str = Depends(request_user_id)):
             },
             "cited_resources": cited_resources,
             "evidence_sources": rag_sources,
-            "next_step": _build_next_step(active_profile, tutor_topic),
+            "next_step": _build_next_step(active_profile, tutor_topic, state.get_user_learning_path(user_id)),
             "exercise": _build_tutor_exercise(tutor_topic, preferred_mode, selected_resource.id if selected_resource else None),
         }
     )
 
 
 @router.post("/tutor/exercise/submit")
-def tutor_exercise_submit(payload: TutorExerciseSubmitRequest, user_id: str = Depends(request_user_id)):
+def tutor_exercise_submit(payload: TutorExerciseSubmitRequest, user_id: str = Depends(authenticated_user_id)):
     return ok(state.evaluate_tutor_exercise(payload.exercise, payload.answer, user_id))
 
 
 @router.post("/quiz/submit")
-def quiz_submit(payload: QuizSubmitRequest):
-    return ok(state.submit_quiz(payload).model_dump())
+def quiz_submit(payload: QuizSubmitRequest, user_id: str = Depends(authenticated_user_id)):
+    return ok(state.submit_quiz_for_user(payload, user_id).model_dump())
 
 
 @router.post("/quiz/refresh")
-def quiz_refresh():
-    quiz = state.refresh_quiz_fast()
+def quiz_refresh(user_id: str = Depends(authenticated_user_id)):
+    quiz = state.refresh_quiz_fast_for_user(user_id)
     return ok(quiz.model_dump())
 
 
 @router.get("/assessment/report")
-def assessment_report():
-    return ok(state.get_or_create_assessment_report().model_dump())
+def assessment_report(user_id: str = Depends(authenticated_user_id)):
+    return ok(state.get_or_create_user_assessment_report(user_id).model_dump())
 
 
 @router.get("/assessment/history")
-def assessment_history(limit: int = 20):
-    return ok(state.assessment_history(limit))
+def assessment_history(limit: int = 20, user_id: str = Depends(authenticated_user_id)):
+    return ok(state.assessment_history(limit, user_id))
 
 
 @router.get("/course/chunks")
@@ -683,6 +747,8 @@ def course_chunks():
 
 
 @router.get("/retrieval/logs")
-def retrieval_logs(limit: int = 20):
+def retrieval_logs(limit: int = 20, user_id: str = Depends(authenticated_user_id)):
     logs = sorted(load_records("retrieval_log"), key=lambda item: item.get("created_at", ""), reverse=True)
+    if user_id != state.DEFAULT_USER_ID:
+        logs = [item for item in logs if item.get("user_id") == user_id]
     return ok(logs[: max(1, min(limit, 100))])

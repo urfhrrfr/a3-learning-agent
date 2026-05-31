@@ -9,6 +9,36 @@ class ApiResponse(BaseModel):
     error: dict[str, Any] | None = None
 
 
+class AuthUser(BaseModel):
+    id: str
+    username: str
+    display_name: str = ""
+    created_at: str = ""
+    last_login_at: str = ""
+
+
+class AuthRegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=40)
+    password: str = Field(min_length=6, max_length=128)
+    display_name: str = Field(default="", max_length=60)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=40)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class AuthSession(BaseModel):
+    token: str
+    user: AuthUser
+    registration_mode: str = "single"
+
+
+class AuthStatus(BaseModel):
+    registration_mode: str
+    has_user: bool
+
+
 class Profile(BaseModel):
     id: str = "student_demo"
     major: str = ""
@@ -84,6 +114,9 @@ class Resource(BaseModel):
     title: str
     content_format: Literal["markdown", "mermaid", "json", "code"]
     content: str
+    artifact_url: str = ""
+    artifact_path: str = ""
+    artifact_filename: str = ""
     evidence_sources: list[EvidenceSource] = Field(default_factory=list)
     source_refs: list[str] = Field(default_factory=list)
     difficulty: str

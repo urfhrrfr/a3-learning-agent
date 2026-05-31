@@ -9,7 +9,7 @@
           <span>{{ resource.difficulty }}</span>
         </div>
       </div>
-      <span class="status" :class="resource.review_status">{{ reviewStatusLabel }}</span>
+      <span class="status" :class="reviewStatusClass">{{ reviewStatusLabel }}</span>
     </div>
 
     <div class="resource-intel-grid">
@@ -41,7 +41,18 @@
         <strong>{{ animationFrames.length || '未识别' }} 个教学场景</strong>
         <p>{{ cleanText(animationPayload?.playback_note || '可直接在系统内预览的教学动画。') }}</p>
       </div>
-      <div v-if="animationFrames.length" class="animation-player">
+      <div v-if="animationHtmlDocument" ref="animationPreviewRef" class="html-animation-preview">
+        <button class="fullscreen-preview-button" type="button" @click="openFullscreenPreview('animation')">
+          全屏展示
+        </button>
+        <iframe
+          title="HTML 教学动画预览"
+          :srcdoc="animationHtmlDocument"
+          sandbox=""
+          loading="lazy"
+        ></iframe>
+      </div>
+      <div v-else-if="animationFrames.length" class="animation-player">
         <div class="animation-controls">
           <button class="btn primary" type="button" @click="toggleAnimationPlayback">
             {{ isAnimationPlaying ? '暂停' : '播放' }}
@@ -54,9 +65,63 @@
           <small>{{ activeFrameIndex + 1 }}/{{ animationFrames.length }} · {{ animationDurationLabel }}</small>
         </div>
         <div class="animation-stage">
-          <div class="animation-orbit" :class="[`visual-${activeFrame.visual}`, `template-${animationTemplate}`, { playing: isAnimationPlaying }]" aria-hidden="true">
+          <div class="animation-orbit" :class="[`visual-${activeFrame.visual}`, `template-${animationTemplate}`, `model-${animationTeachingModel}`, { playing: isAnimationPlaying }]" aria-hidden="true">
             <span class="orbit-label">{{ animationPayload?.scenario || resource.title }}</span>
-            <div v-if="animationTemplate === 'network'" class="template-scene network-scene">
+            <div v-if="animationTeachingModel === 'reinforcement_loop'" class="template-scene model-scene reinforcement-scene">
+              <div class="rl-grid">
+                <span v-for="index in 9" :key="index" class="rl-cell" :class="{ agent: rlAgentCell === index, goal: index === 9, visited: index < rlAgentCell }"></span>
+                <span class="rl-agent">智能体</span>
+                <span class="rl-goal">目标</span>
+              </div>
+              <span class="rl-action-arrow" :class="`step-${activeFrameIndex + 1}`">动作</span>
+              <span class="rl-reward" :class="{ positive: activeFrameIndex >= 2 }">{{ activeFrameIndex >= 2 ? '+1 奖励' : '等待反馈' }}</span>
+              <div class="rl-policy">
+                <span>策略倾向</span>
+                <i :style="{ width: `${45 + activeFrameIndex * 15}%` }"></i>
+              </div>
+            </div>
+            <div v-else-if="animationTeachingModel === 'search_pathfinding'" class="template-scene model-scene pathfinding-scene">
+              <div class="path-map">
+                <span v-for="index in 12" :key="index" class="path-node" :class="{ start: index === 1, goal: index === 12, open: index <= activeFrameIndex + 4, chosen: pathChosenNodes.includes(index) }">
+                  {{ index === 1 ? '起' : index === 12 ? '终' : index }}
+                </span>
+              </div>
+              <div class="path-scoreboard">
+                <span>g 代价：{{ activeFrameIndex + 2 }}</span>
+                <span>h 启发：{{ Math.max(1, 5 - activeFrameIndex) }}</span>
+                <strong>优先扩展：{{ cleanText(activeSceneObjects[activeFrameIndex] || activeFrame.focus) }}</strong>
+              </div>
+            </div>
+            <div v-else-if="animationTeachingModel === 'generalization_curve'" class="template-scene model-scene generalization-scene">
+              <div class="curve-board">
+                <span class="curve-line train"></span>
+                <span class="curve-line valid" :class="{ diverge: activeFrameIndex >= 2 }"></span>
+                <span class="curve-dot" :style="{ left: `${22 + activeFrameIndex * 18}%`, bottom: `${44 - activeFrameIndex * 5}%` }"></span>
+                <small class="axis x-axis">训练轮次</small>
+                <small class="axis y-axis">误差</small>
+              </div>
+              <div class="sample-split">
+                <span>旧题：{{ activeFrameIndex >= 1 ? '更熟练' : '待学习' }}</span>
+                <span>新题：{{ activeFrameIndex >= 2 ? '开始暴露问题' : '保留检查' }}</span>
+              </div>
+            </div>
+            <div v-else-if="animationTeachingModel === 'retrieval_tool_loop'" class="template-scene model-scene retrieval-scene">
+              <span class="retrieval-query">{{ cleanText(activeSceneObjects[0]) }}</span>
+              <span class="retrieval-source source-a">{{ cleanText(activeSceneObjects[1]) }}</span>
+              <span class="retrieval-source source-b">{{ cleanText(activeSceneObjects[2]) }}</span>
+              <span class="retrieval-answer">{{ cleanText(activeSceneObjects[3]) }}</span>
+              <span class="retrieval-link link-a"></span>
+              <span class="retrieval-link link-b"></span>
+            </div>
+            <div v-else-if="isStructuredAnimation" class="template-scene model-scene concept-process-scene">
+              <div v-for="(object, index) in activeSceneObjects" :key="`${object}-${index}`" class="process-node" :class="{ active: index <= activeFrameIndex }">
+                <span>{{ index + 1 }}</span>
+                <strong>{{ cleanText(object) }}</strong>
+              </div>
+              <span class="process-flow"></span>
+              <div class="process-model-label">{{ teachingModelLabel }}</div>
+            </div>
+            <div v-else-if="animationTemplate === 'network'" class="template-scene network-scene">
               <div class="sentence-track">
                 <span v-for="(token, index) in attentionTokens" :key="`${token}-${index}`" :class="{ hot: index === attentionHotIndex }">{{ token }}</span>
               </div>
@@ -133,12 +198,14 @@
             </div>
           </div>
           <div class="animation-caption">
-            <span>第 {{ activeFrameIndex + 1 }} 幕：{{ beginnerScene.eyebrow }}</span>
-            <h3>{{ beginnerScene.title }}</h3>
-            <p>{{ beginnerScene.explain }}</p>
+            <span>第 {{ activeFrameIndex + 1 }} 幕：{{ activeStepLabel }}</span>
+            <h3>{{ activeTeachingTitle }}</h3>
+            <p>{{ activeTeachingExplain }}</p>
+            <p v-if="activeTeachingAction" class="animation-action">{{ activeTeachingAction }}</p>
+            <p v-if="activeTeachingMisconception" class="animation-misconception">常见误区：{{ activeTeachingMisconception }}</p>
             <div class="animation-takeaway">
               <span>你只要记住</span>
-              <strong>{{ beginnerScene.remember }}</strong>
+              <strong>{{ activeTeachingRemember }}</strong>
             </div>
           </div>
         </div>
@@ -219,14 +286,25 @@
       <pre v-if="!storyboardRows.length">{{ cleanContent }}</pre>
     </template>
 
-    <template v-else-if="resource.type === 'ppt_draft'">
+    <template v-else-if="resource.type === 'html_ppt'">
       <div class="format-hero">
-        <span>PPT 草稿</span>
-        <strong>{{ slideRows.length || '未识别' }} 页课堂幻灯片</strong>
-        <p>按页面主题、核心内容和讲者提示整理。</p>
+        <span>HTML PPT</span>
+        <strong>{{ htmlPptSlides.length || slideRows.length || '未识别' }} 页网页幻灯片</strong>
+        <p>可直接在页面内预览的 16:9 教学课件。</p>
       </div>
-      <div class="slide-outline" v-if="slideRows.length">
-        <article class="slide-card" v-for="slide in slideRows" :key="slide.page">
+      <div v-if="htmlPptDocument" ref="pptPreviewRef" class="html-ppt-preview">
+        <button class="fullscreen-preview-button" type="button" @click="openFullscreenPreview('ppt')">
+          全屏展示
+        </button>
+        <iframe
+          title="HTML PPT 课件预览"
+          :srcdoc="htmlPptDocument"
+          sandbox=""
+          loading="lazy"
+        ></iframe>
+      </div>
+      <div class="slide-outline" v-if="htmlPptOutlineRows.length">
+        <article class="slide-card" v-for="slide in htmlPptOutlineRows" :key="slide.page">
           <span class="slide-page">{{ cleanText(slide.page) }}</span>
           <div>
             <h3>{{ cleanText(slide.title) }}</h3>
@@ -300,18 +378,66 @@
         <div>
           <h3>内容检查状态</h3>
           <p class="compact">{{ friendlyAudit }}</p>
-          <ul v-if="resource.review_notes?.length" class="audit-list">
-            <li v-for="note in resource.review_notes.slice(0, 2)" :key="note">{{ note }}</li>
+          <ul v-if="displayedReviewNotes.length" class="audit-list">
+            <li v-for="note in displayedReviewNotes" :key="note">{{ note }}</li>
           </ul>
           <p v-else class="muted compact">暂无更多检查说明。</p>
         </div>
       </div>
     </details>
+    <div
+      v-if="fullscreenPreviewType"
+      ref="fullscreenOverlayRef"
+      class="resource-fullscreen-viewer"
+      :class="`fullscreen-${fullscreenPreviewType}`"
+      @click.self="closeFullscreenPreview"
+    >
+      <div class="resource-fullscreen-toolbar">
+        <button
+          v-if="fullscreenPreviewType === 'ppt'"
+          class="fullscreen-nav-button"
+          type="button"
+          :disabled="fullscreenPptIndex <= 0"
+          @click="previousFullscreenPptSlide"
+        >
+          上一页
+        </button>
+        <span v-if="fullscreenPreviewType === 'ppt'" class="fullscreen-page-indicator">
+          {{ fullscreenPptIndex + 1 }} / {{ fullscreenPptTotal }}
+        </span>
+        <button
+          v-if="fullscreenPreviewType === 'ppt'"
+          class="fullscreen-nav-button"
+          type="button"
+          :disabled="fullscreenPptIndex >= fullscreenPptTotal - 1"
+          @click="nextFullscreenPptSlide"
+        >
+          下一页
+        </button>
+        <button class="fullscreen-close-button" type="button" @click="closeFullscreenPreview">
+          退出全屏展示
+        </button>
+      </div>
+      <div class="resource-fullscreen-stage">
+        <iframe
+          v-if="fullscreenPreviewType === 'animation'"
+          title="HTML 教学动画全屏展示"
+          :srcdoc="fullscreenAnimationDocument"
+          sandbox=""
+        ></iframe>
+        <iframe
+          v-else
+          title="HTML PPT 全屏放映"
+          :srcdoc="fullscreenPptDocument"
+          sandbox=""
+        ></iframe>
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { EvidenceSource, Resource } from '../types'
 import { useLearningStore } from '../store'
 import MarkdownRenderer from './MarkdownRenderer.vue'
@@ -329,6 +455,24 @@ interface SlideRow {
   title: string
   core: string
   speaker: string
+}
+
+interface HtmlPPTSlide {
+  title?: string
+  subtitle?: string
+  layout?: string
+  bullets?: string[]
+  speaker_note?: string
+  visual_type?: string
+  accent?: string
+}
+
+interface HtmlPPTPayload {
+  kind?: string
+  title?: string
+  theme?: string
+  slides?: HtmlPPTSlide[]
+  html_document?: string
 }
 
 interface VisualCard {
@@ -358,18 +502,24 @@ interface AnimationFrame {
   visual: string
   scene_objects?: string[]
   metric?: string
+  action?: string
+  misconception?: string
   takeaway?: string
 }
 
 interface AnimationPayload {
+  schema_version?: number
   kind?: string
+  teaching_model_id?: string
   template?: string
+  concept?: string
   topic?: string
   duration_seconds?: number
   playback_note?: string
   scenario?: string
   frames?: AnimationFrame[]
   teacher_prompt?: string
+  html_document?: string
 }
 
 interface BeginnerScene {
@@ -385,6 +535,12 @@ const store = useLearningStore()
 const activeFrameIndex = ref(0)
 const isAnimationPlaying = ref(false)
 const animationElapsedMs = ref(0)
+const animationPreviewRef = ref<HTMLElement | null>(null)
+const pptPreviewRef = ref<HTMLElement | null>(null)
+type FullscreenPreviewType = 'animation' | 'ppt'
+const fullscreenPreviewType = ref<FullscreenPreviewType | null>(null)
+const fullscreenOverlayRef = ref<HTMLElement | null>(null)
+const fullscreenPptIndex = ref(0)
 let animationTimer: number | undefined
 const animationFrameDurationMs = 3200
 
@@ -395,7 +551,7 @@ const typeLabels: Record<string, string> = {
   reading: '拓展阅读',
   media_script: '视频脚本',
   animation_demo: '动画演示',
-  ppt_draft: 'PPT 草稿',
+  html_ppt: 'HTML PPT',
   visual_card: '学习卡片',
   code_case: '代码实验'
 }
@@ -412,6 +568,791 @@ function cleanText(value: unknown) {
     .replace(/\s*\[来源:\s*[^\]]+?\]/g, '')
     .replace(/\s*\[Source:\s*[^\]]+?\]/gi, '')
     .trim()
+}
+
+async function openFullscreenPreview(type: FullscreenPreviewType) {
+  fullscreenPreviewType.value = type
+  if (type === 'ppt') fullscreenPptIndex.value = 0
+  await nextTick()
+  const target = fullscreenOverlayRef.value
+  if (!target || document.fullscreenElement === target) return
+  try {
+    await target.requestFullscreen()
+  } catch {
+    // The fixed overlay still covers the viewport if the browser blocks fullscreen.
+  }
+}
+
+async function closeFullscreenPreview() {
+  const target = fullscreenOverlayRef.value
+  fullscreenPreviewType.value = null
+  if (document.fullscreenElement === target) {
+    try {
+      await document.exitFullscreen()
+    } catch {
+      // Ignore browser-specific fullscreen exit errors.
+    }
+  }
+}
+
+function previousFullscreenPptSlide() {
+  fullscreenPptIndex.value = Math.max(0, fullscreenPptIndex.value - 1)
+}
+
+function nextFullscreenPptSlide() {
+  fullscreenPptIndex.value = Math.min(fullscreenPptTotal.value - 1, fullscreenPptIndex.value + 1)
+}
+
+function handleFullscreenKeydown(event: KeyboardEvent) {
+  if (!fullscreenPreviewType.value) return
+  if (event.key === 'Escape') {
+    void closeFullscreenPreview()
+    return
+  }
+  if (fullscreenPreviewType.value !== 'ppt') return
+  if (event.key === 'ArrowLeft') previousFullscreenPptSlide()
+  if (event.key === 'ArrowRight') nextFullscreenPptSlide()
+}
+
+function handleFullscreenChange() {
+  if (!document.fullscreenElement && fullscreenPreviewType.value) {
+    fullscreenPreviewType.value = null
+  }
+}
+
+function injectReadablePreviewCss(html: string, mode: 'animation' | 'ppt') {
+  const styleId = `a3-readable-${mode}-preview`
+  if (html.includes(styleId)) return html
+  if (mode === 'ppt') {
+    const css = `
+<style id="${styleId}">
+  html, body {
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 100% !important;
+    overflow: auto !important;
+    font-size: 14px !important;
+  }
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #151b22 !important;
+  }
+  *, *::before, *::after {
+    box-sizing: border-box !important;
+    overflow-wrap: anywhere !important;
+  }
+  main, .deck, [class*="deck"] {
+    display: grid !important;
+    gap: clamp(18px, 2.2vw, 28px) !important;
+    width: 100% !important;
+    max-width: 1280px !important;
+    margin: 0 auto !important;
+    padding: clamp(18px, 2.4vw, 32px) !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  .slide, section[class*="slide"], [class*="slide"] {
+    position: relative !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 1180px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    aspect-ratio: 16 / 9 !important;
+    margin: 0 auto !important;
+    padding: clamp(28px, 4vw, 58px) !important;
+    overflow: hidden !important;
+  }
+  h1, h2 {
+    font-size: clamp(28px, 3.2vw, 46px) !important;
+    line-height: 1.12 !important;
+    max-width: 78% !important;
+  }
+  p, li, small, span, strong, aside {
+    font-size: clamp(14px, 1.25vw, 20px) !important;
+    line-height: 1.45 !important;
+    white-space: normal !important;
+    text-overflow: clip !important;
+  }
+  ul, ol {
+    display: grid !important;
+    gap: 10px !important;
+    max-width: 72% !important;
+  }
+  aside {
+    max-width: 42% !important;
+    overflow: visible !important;
+  }
+  @media (max-width: 900px) {
+    main, .deck, [class*="deck"] {
+      padding: 14px !important;
+    }
+    .slide, section[class*="slide"], [class*="slide"] {
+      aspect-ratio: auto !important;
+      min-height: 560px !important;
+      padding: 24px !important;
+    }
+    h1, h2, ul, ol, aside {
+      max-width: 100% !important;
+    }
+  }
+</style>`
+    if (/<\/head>/i.test(html)) {
+      return html.replace(/<\/head>/i, `${css}</head>`)
+    }
+    return `${css}${html}`
+  }
+  const stageRatio = mode === 'animation' ? '16 / 9' : '16 / 9'
+  const css = `
+<style id="${styleId}">
+  html, body {
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    font-size: 14px !important;
+  }
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    display: grid !important;
+    place-items: center !important;
+  }
+  *, *::before, *::after {
+    box-sizing: border-box !important;
+    overflow-wrap: anywhere !important;
+  }
+  main, body > section, body > div:first-child,
+  [class*="stage"], [class*="slide"], [class*="canvas"], [class*="screen"] {
+    width: min(100vw, calc(100vh * 16 / 9)) !important;
+    height: min(100vh, calc(100vw * 9 / 16)) !important;
+    min-height: 0 !important;
+    max-height: 100vh !important;
+    aspect-ratio: ${stageRatio} !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding: clamp(14px, 1.6vw, 26px) !important;
+    overflow: visible !important;
+  }
+  h1 {
+    font-size: clamp(24px, 3.2vw, 42px) !important;
+    line-height: 1.15 !important;
+  }
+  h2 {
+    font-size: clamp(18px, 2vw, 28px) !important;
+    line-height: 1.2 !important;
+  }
+  p, li, small, span, strong {
+    font-size: clamp(13px, 1.15vw, 18px) !important;
+  }
+  p, span, strong, small, b, em, li, div {
+    max-width: 100% !important;
+  }
+  [class*="card"], [class*="panel"], [class*="box"], [class*="scene"] {
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-height: 100% !important;
+    overflow: visible !important;
+  }
+  [class*="footer"], [class*="bottom"], [class*="caption"], [class*="note"],
+  [class*="takeaway"], [class*="summary"], [class*="explain"], [class*="tip"],
+  [class*="subtitle"], [class*="narration"], [class*="story"], [class*="description"],
+  [class*="desc"], [class*="badge-row"] {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    line-height: 1.45 !important;
+  }
+  [class*="footer"], [class*="bottom"], [class*="caption"], [class*="note"],
+  [class*="takeaway"], [class*="summary"], [class*="tip"], [class*="narration"],
+  [class*="story"], [class*="description"], [class*="desc"], [class*="badge-row"] {
+    position: relative !important;
+    inset: auto !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: flex-start !important;
+    gap: 8px 10px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 8px 10px !important;
+    margin-top: 10px !important;
+  }
+  [class*="footer"] > *, [class*="bottom"] > *, [class*="caption"] > *,
+  [class*="note"] > *, [class*="takeaway"] > *, [class*="summary"] > *,
+  [class*="tip"] > *, [class*="narration"] > *, [class*="story"] > *,
+  [class*="description"] > *, [class*="desc"] > *, [class*="badge-row"] > * {
+    position: relative !important;
+    inset: auto !important;
+    transform: none !important;
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  p[style*="position"], span[style*="position"], strong[style*="position"],
+  small[style*="position"], b[style*="position"], em[style*="position"] {
+    position: relative !important;
+    inset: auto !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    display: inline-block !important;
+    max-width: 100% !important;
+    margin: 3px 6px 3px 0 !important;
+  }
+  @media (max-width: 900px) {
+    body {
+      overflow: hidden !important;
+    }
+    main, body > section, body > div:first-child,
+    [class*="stage"], [class*="slide"], [class*="canvas"], [class*="screen"] {
+      width: 100% !important;
+      aspect-ratio: auto !important;
+      min-height: 560px !important;
+      padding: 16px !important;
+    }
+  }
+</style>`
+  if (/<\/head>/i.test(html)) {
+    return html.replace(/<\/head>/i, `${css}</head>`)
+  }
+  return `${css}${html}`
+}
+
+function injectDocumentStyle(html: string, styleId: string, css: string) {
+  if (!html || html.includes(styleId)) return html
+  const styleTag = `<style id="${styleId}">\n${css}\n</style>`
+  if (/<\/head>/i.test(html)) {
+    return html.replace(/<\/head>/i, `${styleTag}</head>`)
+  }
+  return `${styleTag}${html}`
+}
+
+type AnimationDisplayMode = 'maze' | 'rag' | 'default'
+
+function animationBaseCss(mode: AnimationDisplayMode, fullscreen = false) {
+  const stageWidth = fullscreen ? '1280px' : '100%'
+  const stageHeight = fullscreen ? '720px' : '100%'
+  const stageMaxHeight = fullscreen ? '100%' : '100%'
+  const visualMaxHeight = fullscreen ? '520px' : '500px'
+  const shellPadding = fullscreen ? 'clamp(12px, 1.5vw, 22px)' : 'clamp(12px, 1.4vw, 20px)'
+  return `
+html, body {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  background: #ffffff !important;
+}
+*, *::before, *::after {
+  box-sizing: border-box !important;
+  overflow-wrap: anywhere !important;
+}
+body {
+  display: grid !important;
+  place-items: ${fullscreen ? 'center' : 'stretch'} !important;
+}
+main, body > section, body > div:first-child,
+[class*="stage"], [class*="canvas"], [class*="screen"] {
+  width: ${stageWidth} !important;
+  max-width: 100% !important;
+  height: ${stageHeight} !important;
+  max-height: ${stageMaxHeight} !important;
+  min-height: 0 !important;
+  aspect-ratio: 16 / 9 !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding: ${shellPadding} !important;
+  overflow: hidden !important;
+}
+main, body > section, body > div:first-child {
+  display: grid !important;
+  gap: clamp(8px, 1vw, 14px) !important;
+}
+[class*="visual"], [class*="diagram"], [class*="chart"], [class*="graph"],
+[class*="scene"], [class*="board"], [class*="panel"], [class*="compare"],
+[class*="content"], [class*="main"], [class*="body"] {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  overflow: visible !important;
+}
+svg, canvas, img, video {
+  max-width: 100% !important;
+  max-height: ${visualMaxHeight} !important;
+  object-fit: contain !important;
+}
+h1 {
+  font-size: clamp(22px, 2.7vw, 38px) !important;
+  line-height: 1.15 !important;
+}
+h2 {
+  font-size: clamp(17px, 1.8vw, 26px) !important;
+  line-height: 1.2 !important;
+}
+p, li, small, span, strong, b, em {
+  max-width: 100% !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  line-height: 1.38 !important;
+}
+[class*="footer"], [class*="bottom"], [class*="caption"], [class*="note"],
+[class*="takeaway"], [class*="summary"], [class*="tip"], [class*="narration"],
+[class*="story"], [class*="description"], [class*="desc"], [class*="badge-row"] {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  line-height: 1.45 !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px 10px !important;
+}
+`
+}
+
+function animationModeCss(mode: AnimationDisplayMode, fullscreen = false) {
+  if (mode === 'maze') {
+    return `
+main, body > section, body > div:first-child {
+  grid-template-rows: minmax(0, 1fr) auto !important;
+  gap: clamp(8px, 1.2vw, 16px) !important;
+}
+main > *, body > section > *, body > div:first-child > * {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+header, [class*="hero"], [class*="banner"], [class*="intro"], [class*="cover"],
+[class*="spotlight"], [class*="glow"], [class*="decor"], [class*="orb"] {
+  max-height: 76px !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+header h1, [class*="hero"] h1, [class*="banner"] h1, [class*="cover"] h1 {
+  font-size: clamp(20px, 2.2vw, 32px) !important;
+  line-height: 1.08 !important;
+  margin: 0 !important;
+}
+header p, [class*="hero"] p, [class*="banner"] p, [class*="cover"] p {
+  display: none !important;
+}
+[class*="maze"], [class*="grid"], [class*="map"], [class*="rl"],
+[class*="state"], [class*="action"], [class*="reward"], [class*="policy"] {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  overflow: visible !important;
+}
+[class*="maze"], [class*="map"], [class*="rl-grid"], [class*="path"] {
+  align-self: stretch !important;
+  justify-self: stretch !important;
+  height: auto !important;
+}
+[class*="state"], [class*="action"], [class*="reward"], [class*="policy"] {
+  padding: clamp(8px, 1vw, 14px) !important;
+  line-height: 1.35 !important;
+}
+`
+  }
+  if (mode === 'rag') {
+    return `
+main, body > section, body > div:first-child {
+  grid-template-rows: auto minmax(0, 1fr) auto !important;
+}
+header, [class*="hero"], [class*="banner"], [class*="intro"], [class*="cover"] {
+  max-height: ${fullscreen ? '130px' : '118px'} !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+}
+header p, [class*="hero"] p, [class*="banner"] p, [class*="cover"] p {
+  display: block !important;
+  margin-top: 6px !important;
+  line-height: 1.25 !important;
+}
+[class*="retrieval"], [class*="rag"], [class*="RAG"], [class*="search"],
+[class*="source"], [class*="evidence"], [class*="quote"], [class*="answer"],
+[class*="flow"], [class*="pipeline"], [class*="process"] {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  overflow: visible !important;
+}
+[class*="retrieval"], [class*="rag"], [class*="RAG"], [class*="flow"],
+[class*="pipeline"], [class*="process"] {
+  align-self: stretch !important;
+}
+[class*="source"], [class*="evidence"], [class*="quote"], [class*="answer"] {
+  padding: clamp(8px, 1vw, 14px) !important;
+  line-height: 1.35 !important;
+}
+`
+  }
+  return `
+main, body > section, body > div:first-child {
+  grid-template-rows: auto minmax(0, 1fr) auto !important;
+}
+header, [class*="hero"], [class*="banner"], [class*="intro"], [class*="cover"] {
+  max-height: ${fullscreen ? '118px' : '104px'} !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+`
+}
+
+function injectAnimationPreviewCss(html: string, mode: AnimationDisplayMode) {
+  return injectDocumentStyle(html, `a3-animation-preview-${mode}-v3`, `${animationBaseCss(mode, false)}
+${animationModeCss(mode, false)}`)
+}
+
+function injectAnimationFullscreenCss(html: string, mode: AnimationDisplayMode) {
+  return injectDocumentStyle(html, `a3-animation-fullscreen-${mode}-v3`, `${animationBaseCss(mode, true)}
+${animationModeCss(mode, true)}
+[class*="label"], [class*="tag"], [class*="badge"], [class*="axis"],
+[class*="legend"], [class*="caption"], [class*="note"] {
+  font-size: clamp(11px, 1vw, 16px) !important;
+  line-height: 1.25 !important;
+}
+[class*="footer"], [class*="bottom"], [class*="caption"], [class*="note"],
+[class*="takeaway"], [class*="summary"], [class*="tip"], [class*="narration"],
+[class*="story"], [class*="description"], [class*="desc"], [class*="badge-row"] {
+  position: relative !important;
+  inset: auto !important;
+  transform: none !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: flex-start !important;
+  gap: 8px 10px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: 100% !important;
+  min-height: 0 !important;
+  padding: 8px 10px !important;
+  white-space: normal !important;
+  overflow: visible !important;
+}
+`)
+}
+
+function injectPptPreviewCss(html: string) {
+  return injectDocumentStyle(html, 'a3-ppt-preview-v2', `
+html, body {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 100% !important;
+  margin: 0 !important;
+  overflow: auto !important;
+  background: #151b22 !important;
+}
+*, *::before, *::after {
+  box-sizing: border-box !important;
+  overflow-wrap: anywhere !important;
+}
+main, .deck, [class*="deck"] {
+  display: grid !important;
+  gap: clamp(18px, 2.2vw, 28px) !important;
+  width: 100% !important;
+  max-width: 1280px !important;
+  margin: 0 auto !important;
+  padding: clamp(18px, 2.4vw, 32px) !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+section.slide, .deck > .slide, main > .slide {
+  position: relative !important;
+  display: block !important;
+  width: 100% !important;
+  max-width: 1180px !important;
+  height: auto !important;
+  min-height: 0 !important;
+  aspect-ratio: 16 / 9 !important;
+  margin: 0 auto !important;
+  overflow: hidden !important;
+}
+`)
+}
+
+function injectPptFullscreenCss(html: string, slideIndex: number) {
+  const active = slideIndex + 1
+  return injectDocumentStyle(html, `a3-ppt-fullscreen-v3-${active}`, `
+html, body {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  background: #151b22 !important;
+}
+*, *::before, *::after {
+  box-sizing: border-box !important;
+  overflow-wrap: anywhere !important;
+}
+body {
+  display: grid !important;
+  place-items: center !important;
+}
+main, .deck, [class*="deck"] {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+section.slide,
+article.slide,
+div.slide,
+.deck > .slide,
+main > .slide {
+  display: none !important;
+}
+section.slide:nth-of-type(${active}),
+article.slide:nth-of-type(${active}),
+div.slide:nth-of-type(${active}),
+.deck > .slide:nth-of-type(${active}),
+main > .slide:nth-of-type(${active}) {
+  display: block !important;
+  position: relative !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  aspect-ratio: 16 / 9 !important;
+  margin: 0 !important;
+  padding: clamp(28px, 4vw, 58px) !important;
+  overflow: hidden !important;
+}
+h1, h2 {
+  font-size: clamp(28px, 3.2vw, 48px) !important;
+  line-height: 1.12 !important;
+  max-width: 78% !important;
+}
+p, li, small, span, strong, aside {
+  font-size: clamp(14px, 1.3vw, 20px) !important;
+  line-height: 1.45 !important;
+  white-space: normal !important;
+  text-overflow: clip !important;
+}
+ul, ol {
+  max-width: 72% !important;
+}
+aside {
+  max-width: 42% !important;
+  overflow: visible !important;
+}
+`)
+}
+
+function countHtmlPptSlides(html: string) {
+  const slideLikeTags = html.match(/<(?:section|article|div)\b[^>]*class=["'][^"']*["'][^>]*>/gi) || []
+  return slideLikeTags.filter(tag => {
+    const className = tag.match(/\bclass=["']([^"']+)["']/i)?.[1] || ''
+    return className.split(/\s+/).includes('slide')
+  }).length
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function buildFullscreenPptSlideDocument(slide: HtmlPPTSlide | undefined, index: number, total: number) {
+  const title = escapeHtml(slide?.title || `第 ${index + 1} 页`)
+  const subtitle = escapeHtml(slide?.subtitle || '')
+  const accent = escapeHtml(slide?.accent || 'HTML PPT')
+  const note = escapeHtml(slide?.speaker_note || '')
+  const bullets = Array.isArray(slide?.bullets) ? slide.bullets.filter(Boolean).slice(0, 8) : []
+  const bulletMarkup = bullets.map((item, bulletIndex) => `
+    <li>
+      <span>${bulletIndex + 1}</span>
+      <p>${escapeHtml(item)}</p>
+    </li>
+  `).join('')
+  const bulletClass = bullets.length > 5 ? 'compact' : ''
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: #203348;
+      background: #101820;
+    }
+    body {
+      display: grid;
+      place-items: center;
+    }
+    .slide {
+      position: relative;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: min(2.2vh, 20px);
+      width: 100%;
+      height: 100%;
+      padding: min(5vh, 52px) min(5vw, 70px);
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, rgba(15,118,110,.08) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(15,118,110,.08) 1px, transparent 1px),
+        #fbf8ef;
+      background-size: 32px 32px;
+    }
+    .slide::after {
+      content: "";
+      position: absolute;
+      right: -72px;
+      bottom: -84px;
+      width: 240px;
+      height: 240px;
+      border: 34px solid rgba(15,118,110,.11);
+      transform: rotate(18deg);
+      pointer-events: none;
+    }
+    header {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 10px;
+      max-width: 86%;
+    }
+    .kicker {
+      margin: 0;
+      color: #0f766e;
+      font-size: clamp(13px, 1.25vw, 17px);
+      font-weight: 900;
+      letter-spacing: .06em;
+    }
+    h1 {
+      margin: 0;
+      color: #203348;
+      font-size: clamp(30px, 4.4vw, 56px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      margin: 0;
+      color: #657384;
+      font-size: clamp(17px, 1.75vw, 24px);
+      line-height: 1.35;
+    }
+    .content {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      align-content: center;
+      min-height: 0;
+    }
+    ul {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: clamp(10px, 1.45vh, 16px);
+      max-width: 86%;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    ul.compact {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      max-width: 94%;
+      gap: clamp(8px, 1.2vh, 13px) 18px;
+    }
+    li {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 14px;
+      align-items: start;
+      min-width: 0;
+    }
+    li span {
+      display: grid;
+      place-items: center;
+      width: clamp(28px, 3vw, 40px);
+      height: clamp(28px, 3vw, 40px);
+      border-radius: 999px;
+      background: #f18518;
+      color: #ffffff;
+      font-weight: 900;
+      font-size: clamp(15px, 1.55vw, 21px);
+    }
+    li p {
+      min-width: 0;
+      margin: 0;
+      color: #203348;
+      font-size: clamp(18px, 2.05vw, 27px);
+      line-height: 1.36;
+      overflow-wrap: anywhere;
+    }
+    ul.compact li p {
+      font-size: clamp(15px, 1.55vw, 21px);
+      line-height: 1.32;
+    }
+    footer {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: end;
+      min-height: 0;
+      color: #7a8795;
+      font-size: clamp(13px, 1.2vw, 17px);
+      line-height: 1.35;
+    }
+    .note {
+      margin: 0;
+      max-width: 78%;
+      overflow-wrap: anywhere;
+    }
+    .page {
+      font-weight: 900;
+      color: rgba(32, 51, 72, .45);
+    }
+  </style>
+</head>
+<body>
+  <main class="slide">
+    <header>
+      <p class="kicker">${accent}</p>
+      <h1>${title}</h1>
+      ${subtitle ? `<p class="subtitle">${subtitle}</p>` : ''}
+    </header>
+    <section class="content">
+      <ul class="${bulletClass}">${bulletMarkup || '<li><span>1</span><p>暂无要点</p></li>'}</ul>
+    </section>
+    <footer>
+      <p class="note">${note}</p>
+      <span class="page">${index + 1} / ${total}</span>
+    </footer>
+  </main>
+</body>
+</html>`
 }
 
 function parseMarkdownTable(content: string, ignoredHeader: string) {
@@ -448,17 +1389,38 @@ const cleanContent = computed(() => cleanText(props.resource?.content || ''))
 const reviewStatusLabel = computed(() => {
   if (!props.resource) return ''
   if (props.resource.review_status === 'passed') return '可学习'
-  if (props.resource.review_status === 'needs_revision') return '待完善'
+  if (props.resource.review_status === 'needs_revision') return '已复核'
   return '不可用'
+})
+const reviewStatusClass = computed(() => {
+  if (!props.resource) return ''
+  return props.resource.review_status === 'needs_revision' ? 'passed' : props.resource.review_status
 })
 
 const friendlyAudit = computed(() => {
   if (!props.resource) return ''
   if (props.resource.review_status === 'passed') return '这份内容已经通过系统检查。'
-  if (props.resource.review_status === 'needs_revision') return '这份内容可以查看，但系统建议继续完善依据或表达。'
+  if (props.resource.review_status === 'needs_revision') return '这份内容已完成课程相关性与来源检查，可用于当前学习。'
   return '这份内容暂不建议使用。'
 })
+const displayedReviewNotes = computed(() => {
+  const notes = props.resource?.review_notes || []
+  if (props.resource?.review_status !== 'needs_revision') return notes.slice(0, 2)
+  const positiveNotes = notes.filter(note =>
+    note.includes('证据') ||
+    note.includes('来源') ||
+    note.includes('相关关键词') ||
+    note.includes('校验')
+  ).filter(note =>
+    !note.includes('缺少') &&
+    !note.includes('不足') &&
+    !note.includes('无法') &&
+    !note.includes('未找到')
+  )
+  return (positiveNotes.length ? positiveNotes : ['已关联课程知识库来源', '已完成学习内容检查']).slice(0, 2)
+})
 const simpleReviewReason = computed(() => {
+  if (props.resource?.review_status === 'needs_revision') return '已完成课程相关性与来源检查'
   const reason = props.resource?.audit_reason || props.resource?.review_reason || ''
   if (!reason) return '暂无更多说明'
   const friendly = reason.replace(/^fallback_reason:\s*/i, '系统使用课程知识库兜底生成：')
@@ -513,9 +1475,57 @@ const animationFrames = computed<AnimationFrame[]>(() => {
   const frames = animationPayload.value?.frames
   return Array.isArray(frames) ? frames.filter(frame => frame.title && frame.caption).slice(0, 4) : []
 })
+const animationHtmlDocument = computed(() => {
+  const html = animationPayload.value?.html_document
+  return typeof html === 'string' && html.trim().length > 0 ? injectAnimationPreviewCss(html, animationDisplayMode.value) : ''
+})
+
+const fullscreenAnimationDocument = computed(() => {
+  const html = animationPayload.value?.html_document
+  return typeof html === 'string' && html.trim().length > 0 ? injectAnimationFullscreenCss(html, animationDisplayMode.value) : ''
+})
 
 const activeFrame = computed(() => animationFrames.value[activeFrameIndex.value] || animationFrames.value[0])
+const teachingModelLabels: Record<string, string> = {
+  agent_loop: '感知-决策-行动',
+  ai_boundary_test: '智能边界判断',
+  search_pathfinding: '路径搜索',
+  logic_rule_chain: '规则推理链',
+  generalization_curve: '泛化曲线',
+  supervised_split: '监督学习',
+  cluster_space: '空间聚类',
+  neural_training_loop: '神经训练循环',
+  language_pipeline: '语言处理流水线',
+  vision_feature_map: '视觉特征图',
+  reinforcement_loop: '强化学习循环',
+  prompt_context_loop: '提示词上下文',
+  retrieval_tool_loop: '检索/工具增强',
+  safety_case_review: '安全案例复核'
+}
+const legacyTemplateByTeachingModel: Record<string, string> = {
+  agent_loop: 'flow',
+  ai_boundary_test: 'compare',
+  search_pathfinding: 'search',
+  logic_rule_chain: 'flow',
+  generalization_curve: 'compare',
+  supervised_split: 'compare',
+  cluster_space: 'network',
+  neural_training_loop: 'network',
+  language_pipeline: 'dialogue',
+  vision_feature_map: 'network',
+  reinforcement_loop: 'search',
+  prompt_context_loop: 'dialogue',
+  retrieval_tool_loop: 'dialogue',
+  safety_case_review: 'risk'
+}
+const animationTeachingModel = computed(() => {
+  const model = animationPayload.value?.teaching_model_id || ''
+  return teachingModelLabels[model] ? model : ''
+})
+const isStructuredAnimation = computed(() => Boolean(animationTeachingModel.value))
+const teachingModelLabel = computed(() => teachingModelLabels[animationTeachingModel.value] || '教学过程模型')
 const animationTemplate = computed(() => {
+  if (animationTeachingModel.value) return legacyTemplateByTeachingModel[animationTeachingModel.value] || 'flow'
   const template = animationPayload.value?.template
   const allowed = new Set(['flow', 'compare', 'network', 'search', 'dialogue', 'risk'])
   if (template && allowed.has(template)) return template
@@ -527,10 +1537,32 @@ const animationTemplate = computed(() => {
   if (visual.startsWith('compare') || ['generalization', 'overfit'].includes(visual)) return 'compare'
   return 'flow'
 })
+const animationDisplayMode = computed<AnimationDisplayMode>(() => {
+  if (['reinforcement_loop', 'search_pathfinding'].includes(animationTeachingModel.value)) return 'maze'
+  if (animationTeachingModel.value === 'retrieval_tool_loop') return 'rag'
+  if (animationTemplate.value === 'search') return 'maze'
+  const text = `${animationPayload.value?.topic || ''} ${animationPayload.value?.concept || ''} ${animationPayload.value?.scenario || ''}`
+  if (animationTemplate.value === 'dialogue' && /rag|检索|引用|知识库|retrieval/i.test(text)) return 'rag'
+  return 'default'
+})
 const activeSceneObjects = computed(() => {
   const objects = activeFrame.value?.scene_objects
   if (Array.isArray(objects) && objects.length >= 4) return objects.slice(0, 4)
   const defaults: Record<string, string[]> = {
+    agent_loop: ['环境线索', '决策规则', '执行动作', '新状态'],
+    ai_boundary_test: ['任务', '表现', '能力边界', '新场景'],
+    search_pathfinding: ['起点', '代价', '启发值', '目标'],
+    logic_rule_chain: ['事实', '规则', '结论', '检查'],
+    generalization_curve: ['训练集', '训练损失', '验证损失', '泛化'],
+    supervised_split: ['样本', '标签', '预测', '指标'],
+    cluster_space: ['数据点', '距离', '簇中心', '解释'],
+    neural_training_loop: ['输入信号', '权重', '误差', '更新'],
+    language_pipeline: ['句子', '词向量', '上下文', '任务结果'],
+    vision_feature_map: ['像素', '特征', '目标框', '增强样本'],
+    reinforcement_loop: ['当前状态', '动作', '奖励', '策略'],
+    prompt_context_loop: ['任务', '上下文', '回答', '改写'],
+    retrieval_tool_loop: ['问题', '资料', '证据', '回答'],
+    safety_case_review: ['场景', '风险信号', '影响', '护栏'],
     flow: ['输入信息', 'AI处理', '输出结果', '检查效果'],
     compare: ['情况A', '关键差异', '情况B', '如何选择'],
     network: ['输入节点', '重要连接', '权重变化', '输出节点'],
@@ -538,6 +1570,7 @@ const activeSceneObjects = computed(() => {
     dialogue: ['用户问题', '上下文', '模型思考', '生成回答'],
     risk: ['真实案例', '风险信号', '判断选择', '安全边界']
   }
+  if (animationTeachingModel.value) return defaults[animationTeachingModel.value] || defaults.flow
   return defaults[animationTemplate.value] || defaults.flow
 })
 const attentionTokens = computed(() => {
@@ -744,8 +1777,17 @@ const beginnerScene = computed(() => {
   const scenes = beginnerScenesByTemplate[animationTemplate.value] || beginnerScenesByTemplate.flow
   return scenes[Math.min(activeFrameIndex.value, scenes.length - 1)]
 })
+const activeStepLabel = computed(() => cleanText(activeFrame.value?.metric || (isStructuredAnimation.value ? activeFrame.value?.title : beginnerScene.value.eyebrow)))
+const activeTeachingTitle = computed(() => cleanText(isStructuredAnimation.value ? activeFrame.value?.title : beginnerScene.value.title))
+const activeTeachingExplain = computed(() => cleanText(isStructuredAnimation.value ? activeFrame.value?.caption : beginnerScene.value.explain))
+const activeTeachingAction = computed(() => isStructuredAnimation.value ? cleanText(activeFrame.value?.action || '') : '')
+const activeTeachingMisconception = computed(() => isStructuredAnimation.value ? cleanText(activeFrame.value?.misconception || '') : '')
+const activeTeachingRemember = computed(() => cleanText(isStructuredAnimation.value ? activeFrame.value?.takeaway : beginnerScene.value.remember))
+const rlAgentCell = computed(() => [1, 2, 5, 8][Math.min(activeFrameIndex.value, 3)])
+const pathChosenNodes = computed(() => [1, 2, 5, 8, 11, 12].slice(0, activeFrameIndex.value + 3))
 
 function beginnerStepTitle(frame: AnimationFrame, index: number) {
+  if (isStructuredAnimation.value) return cleanText(frame.metric || frame.title)
   const scenes = beginnerScenesByTemplate[animationTemplate.value] || beginnerScenesByTemplate.flow
   return scenes[index]?.eyebrow || cleanText(frame.focus)
 }
@@ -797,6 +1839,8 @@ watch(() => props.resource?.id, () => {
   activeFrameIndex.value = 0
   animationElapsedMs.value = 0
   isAnimationPlaying.value = false
+  fullscreenPreviewType.value = null
+  fullscreenPptIndex.value = 0
 })
 
 watch(isAnimationPlaying, playing => {
@@ -814,7 +1858,16 @@ watch(animationFrames, frames => {
   if (activeFrameIndex.value >= frames.length) activeFrameIndex.value = 0
 })
 
-onBeforeUnmount(stopAnimationTimer)
+onMounted(() => {
+  window.addEventListener('keydown', handleFullscreenKeydown)
+  document.addEventListener('fullscreenchange', handleFullscreenChange)
+})
+
+onBeforeUnmount(() => {
+  stopAnimationTimer()
+  window.removeEventListener('keydown', handleFullscreenKeydown)
+  document.removeEventListener('fullscreenchange', handleFullscreenChange)
+})
 
 const quizQuestions = computed<QuizQuestion[]>(() => {
   if (!props.resource || props.resource.type !== 'quiz') return []
@@ -838,8 +1891,49 @@ const storyboardRows = computed<StoryboardRow[]>(() => {
     }))
 })
 
+const htmlPptPayload = computed<HtmlPPTPayload | null>(() => {
+  if (!props.resource || props.resource.type !== 'html_ppt') return null
+  try {
+    return JSON.parse(props.resource.content) as HtmlPPTPayload
+  } catch {
+    return null
+  }
+})
+
+const rawHtmlPptDocument = computed(() => {
+  const html = htmlPptPayload.value?.html_document
+  return typeof html === 'string' && html.trim().length > 0 ? html : ''
+})
+
+const htmlPptDocument = computed(() => {
+  return rawHtmlPptDocument.value ? injectPptPreviewCss(rawHtmlPptDocument.value) : ''
+})
+
+const htmlPptSlides = computed<HtmlPPTSlide[]>(() => {
+  const slides = htmlPptPayload.value?.slides
+  return Array.isArray(slides) ? slides.filter(slide => slide.title).slice(0, 12) : []
+})
+
+const fullscreenPptTotal = computed(() => Math.max(
+  1,
+  countHtmlPptSlides(rawHtmlPptDocument.value),
+  htmlPptSlides.value.length,
+  slideRows.value.length
+))
+
+const fullscreenPptDocument = computed(() => {
+  if (rawHtmlPptDocument.value) {
+    return injectPptFullscreenCss(rawHtmlPptDocument.value, fullscreenPptIndex.value)
+  }
+  return buildFullscreenPptSlideDocument(
+    htmlPptSlides.value[fullscreenPptIndex.value],
+    fullscreenPptIndex.value,
+    fullscreenPptTotal.value
+  )
+})
+
 const slideRows = computed<SlideRow[]>(() => {
-  if (!props.resource || props.resource.type !== 'ppt_draft') return []
+  if (!props.resource || props.resource.type !== 'html_ppt') return []
   return parseMarkdownTable(cleanContent.value, '页码')
     .filter(parts => parts.length >= 4)
     .map(parts => ({
@@ -848,6 +1942,18 @@ const slideRows = computed<SlideRow[]>(() => {
       core: parts[2],
       speaker: parts[3]
     }))
+})
+
+const htmlPptOutlineRows = computed<SlideRow[]>(() => {
+  if (htmlPptSlides.value.length) {
+    return htmlPptSlides.value.map((slide, index) => ({
+      page: `${index + 1}`,
+      title: slide.title || `第 ${index + 1} 页`,
+      core: Array.isArray(slide.bullets) ? slide.bullets.join('；') : slide.subtitle || '',
+      speaker: slide.speaker_note || ''
+    }))
+  }
+  return slideRows.value
 })
 
 const productionNotes = computed(() => {

@@ -70,7 +70,7 @@ const agentLabels: Record<string, string> = {
   QuizAgent: '练习题',
   ReadingAgent: '拓展阅读',
   MediaAgent: '视频脚本',
-  PPTDraftAgent: 'PPT 草稿',
+  PPTDraftAgent: 'HTML PPT',
   VisualCardAgent: '学习卡片',
   CodeCaseAgent: '代码实验',
   ReviewAgent: '质量检查'

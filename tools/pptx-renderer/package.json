@@ -1,0 +1,9 @@
+{
+  "name": "a3-pptx-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pptxgenjs": "^3.12.0"
+  }
+}

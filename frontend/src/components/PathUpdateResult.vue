@@ -64,7 +64,7 @@ function typeLabel(type: string) {
     reading: '拓展阅读',
     media_script: '视频脚本',
     animation_demo: '动画演示',
-    ppt_draft: 'PPT 草稿',
+    html_ppt: 'HTML PPT',
     visual_card: '学习卡片',
     code_case: '代码实验'
   }

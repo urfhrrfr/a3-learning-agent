@@ -97,7 +97,11 @@
             <h2>本轮任务清单</h2>
             <p class="muted compact">每一步都包含预计时间和推荐原因。</p>
           </div>
-          <button class="btn secondary" :disabled="store.refreshing" @click="store.refresh">
+          <div v-if="isProfileCleared" class="resource-actions">
+            <RouterLink class="btn secondary" to="/profile">补充档案</RouterLink>
+            <RouterLink class="btn ghost" to="/generate">生成资料</RouterLink>
+          </div>
+          <button v-else class="btn secondary" :disabled="store.refreshing" @click="store.refresh">
             {{ store.refreshing ? '同步中...' : '同步路径' }}
           </button>
         </div>
@@ -113,11 +117,11 @@
         </div>
 
         <div v-else class="empty">
-          <strong>还没有学习路径</strong>
-          <span>这是因为系统还缺少学习目标、资源或练习反馈。先生成一组材料，或完成一次练习。</span>
+          <strong>{{ isProfileCleared ? '学习档案已清空' : '还没有学习路径' }}</strong>
+          <span>{{ isProfileCleared ? '请先补充学习目标或生成学习资料，系统会重新规划任务。' : '这是因为系统还缺少学习目标、资源或练习反馈。先生成一组材料，或完成一次练习。' }}</span>
           <div class="resource-actions">
-            <RouterLink class="btn secondary" to="/generate">生成资源</RouterLink>
-            <RouterLink class="btn ghost" to="/assessment">做一次练习</RouterLink>
+            <RouterLink class="btn secondary" :to="isProfileCleared ? '/profile' : '/generate'">{{ isProfileCleared ? '补充学习档案' : '生成资源' }}</RouterLink>
+            <RouterLink class="btn ghost" to="/generate">生成学习资料</RouterLink>
           </div>
         </div>
       </section>
@@ -189,6 +193,7 @@ const totalMinutes = computed(() => store.path?.steps.reduce((sum, step) => sum 
 const firstStepLabel = computed(() => store.path?.steps[0]?.title || '先生成学习资料')
 const secondStepLabel = computed(() => store.path?.steps[1]?.title || '按推荐资源学习')
 const thirdStepLabel = computed(() => store.path?.steps[2]?.title || '完成练习并复盘')
+const isProfileCleared = computed(() => !store.profile && !store.path)
 const historicalPaths = computed(() => store.pathHistory.filter(path => !path.is_current))
 
 function formatDate(value?: string | null) {

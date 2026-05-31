@@ -4,19 +4,19 @@
       <div>
         <span class="eyebrow">我的学习档案</span>
         <h1>先看和我学习有关的事</h1>
-        <p>这里展示我的学习目标、薄弱点、学习偏好和系统建议。</p>
+        <p>本轮识别结果、长期画像和历史记录分开展示，当前推荐优先看本轮输入。</p>
         <div class="hero-summary-strip" aria-label="学习档案摘要">
           <span>
             <small>学习目标</small>
-            <strong>{{ store.profile?.learning_goal || '未填写' }}</strong>
+            <strong>{{ activeTurnProfile?.learning_goal || store.profile?.learning_goal || '未填写' }}</strong>
           </span>
           <span>
             <small>薄弱点</small>
-            <strong>{{ weakPointText }}</strong>
+            <strong>{{ turnWeakPointText }}</strong>
           </span>
           <span>
             <small>学习偏好</small>
-            <strong>{{ preferenceText }}</strong>
+            <strong>{{ turnPreferenceText }}</strong>
           </span>
         </div>
       </div>
@@ -32,23 +32,23 @@
 
     <section class="student-summary-grid">
       <article class="metric-tile">
-        <span>我的学习目标</span>
-        <strong>{{ store.profile?.learning_goal || '未填写' }}</strong>
-        <small>{{ store.profile?.course || '等待画像同步' }}</small>
+        <span>本轮学习目标</span>
+        <strong>{{ activeTurnProfile?.learning_goal || '等待输入' }}</strong>
+        <small>{{ activeTurnProfile?.course || store.profile?.course || '等待画像同步' }}</small>
       </article>
       <article class="metric-tile">
-        <span>档案薄弱点</span>
-        <strong>{{ weakPointCount }}</strong>
-        <small>{{ weakPointText }}</small>
+        <span>本轮困惑</span>
+        <strong>{{ turnWeakPointCount }}</strong>
+        <small>{{ turnWeakPointText }}</small>
       </article>
       <article class="metric-tile">
-        <span>本轮抽取</span>
-        <strong>{{ currentExtractionCount }}</strong>
-        <small>{{ currentExtractionSummary }}</small>
+        <span>长期画像</span>
+        <strong>{{ longTermWeakPointCount }}</strong>
+        <small>{{ longTermWeakPointText }}</small>
       </article>
       <article class="metric-tile">
         <span>学习偏好</span>
-        <strong>{{ preferenceText }}</strong>
+        <strong>{{ turnPreferenceText }}</strong>
         <small>{{ store.profile?.time_budget || '时间安排未记录' }}</small>
       </article>
     </section>
@@ -64,10 +64,10 @@
               <p class="muted compact">根据你已经告诉我的目标、薄弱点和学习偏好，整理出当前最适合的学习建议。</p>
             </div>
           </div>
-          <div v-if="store.profile" class="profile-fact-list">
-            <div><span>学习目标</span><strong>{{ store.profile.learning_goal || '未填写' }}</strong></div>
-            <div><span>薄弱点</span><strong>{{ weakPointText }}</strong></div>
-            <div><span>喜欢的材料</span><strong>{{ preferenceText }}</strong></div>
+          <div v-if="activeTurnProfile || store.profile" class="profile-fact-list">
+            <div><span>本轮目标</span><strong>{{ activeTurnProfile?.learning_goal || store.profile?.learning_goal || '未填写' }}</strong></div>
+            <div><span>本轮困惑</span><strong>{{ turnWeakPointText }}</strong></div>
+            <div><span>本轮偏好</span><strong>{{ turnPreferenceText }}</strong></div>
             <div><span>建议</span><strong>{{ adviceDetail }}</strong></div>
           </div>
           <div v-else class="empty small-empty">
@@ -89,17 +89,16 @@
       <section class="panel span-6 profile-extraction-card">
         <div class="panel-title">
           <div>
-            <h2>本轮抽取结果</h2>
-            <p class="muted compact">只展示刚刚这句话带来的字段变化，不混入历史评估。</p>
+            <h2>本轮识别结果</h2>
+            <p class="muted compact">只展示刚刚这句话抽取出的目标、困惑和偏好，不混入历史画像。</p>
           </div>
           <span class="status" :class="{ running: loading }">{{ loading ? '抽取中' : currentExtractionCount ? '已更新' : '等待输入' }}</span>
         </div>
-        <div v-if="currentFieldItems.length" class="profile-fact-list">
-          <div v-for="item in currentFieldItems" :key="item.key">
-            <span>{{ item.label }}</span>
-            <strong>{{ item.after }}</strong>
-            <small class="muted">之前：{{ item.before }}</small>
-          </div>
+        <div v-if="activeTurnProfile" class="profile-fact-list">
+          <div><span>本轮目标</span><strong>{{ activeTurnProfile.learning_goal || '未识别' }}</strong></div>
+          <div><span>本轮困惑</span><strong>{{ turnWeakPointText }}</strong></div>
+          <div><span>本轮偏好</span><strong>{{ turnPreferenceText }}</strong></div>
+          <div><span>不稳定信息</span><strong>{{ turnUnstableText }}</strong></div>
         </div>
         <div v-else class="empty small-empty">
           <strong>还没有本轮抽取</strong>
@@ -110,20 +109,37 @@
       <section class="panel span-6 profile-history-card">
         <div class="panel-title">
           <div>
-            <h2>历史学习档案</h2>
-            <p class="muted compact">这些内容来自之前的练习、资源或路径记录，不代表本句话新抽取。</p>
+            <h2>长期画像与历史</h2>
+            <p class="muted compact">长期画像只保留稳定偏好和已确认信息，历史记录用于回溯，不覆盖本轮。</p>
           </div>
-          <span class="status">{{ historicalReport ? '有历史评估' : '无历史评估' }}</span>
+          <div class="profile-panel-actions">
+            <span class="status">{{ historicalReport ? '有历史评估' : '无历史评估' }}</span>
+            <button class="btn danger compact-action" type="button" :disabled="profileDeleting || (!store.profile && !activeTurnProfile && !changeLogs.length)" @click="clearProfile">
+              {{ profileDeleting ? '清空中' : '清空档案' }}
+            </button>
+          </div>
         </div>
-        <div v-if="historicalReport" class="profile-fact-list">
+        <div v-if="profileDeleteError" class="empty error-state profile-inline-error">
+          <strong>学习档案清空失败</strong>
+          <span>{{ profileDeleteError }}</span>
+        </div>
+        <div v-if="store.profile" class="profile-fact-list">
           <div>
-            <span>历史评估薄弱点</span>
-            <strong>{{ historicalReport.weak_points.length ? historicalReport.weak_points.slice(0, 4).join('、') : '暂未发现新的薄弱点' }}</strong>
+            <span>长期目标</span>
+            <strong>{{ store.profile.learning_goal || '未记录' }}</strong>
           </div>
           <div>
-            <span>历史得分</span>
-            <strong>{{ historicalReport.score }} 分</strong>
-            <small class="muted">{{ historicalReport.created_at }}</small>
+            <span>长期薄弱点</span>
+            <strong>{{ longTermWeakPointText }}</strong>
+            <small class="muted">不会直接覆盖本轮困惑</small>
+          </div>
+          <div>
+            <span>稳定偏好</span>
+            <strong>{{ longTermPreferenceText }}</strong>
+          </div>
+          <div>
+            <span>最近历史</span>
+            <strong>{{ latestHistoryText }}</strong>
           </div>
         </div>
         <div v-else class="empty small-empty">
@@ -185,6 +201,8 @@ const changeLogs = ref<ProfileChangeLog[]>([])
 const metaLoading = ref(false)
 const metaError = ref('')
 const loading = ref(false)
+const profileDeleting = ref(false)
+const profileDeleteError = ref('')
 const realReport = computed(() => isDemoAssessmentReport(store.report) ? null : store.report)
 
 const fieldLabels: Record<string, string> = {
@@ -219,27 +237,47 @@ const currentPath = computed(() => {
   if (!store.path || !store.profile?.updated_at) return null
   return Date.parse(store.path.updated_at) >= Date.parse(store.profile.updated_at) ? store.path : null
 })
-const weakPointCount = computed(() => {
-  const points = new Set<string>()
-  for (const point of store.profile?.weak_points || []) points.add(point)
-  for (const point of currentReport.value?.weak_points || []) points.add(point)
-  return points.size
+const activeTurnProfile = computed(() => store.turnProfile || latestTurnFromHistory.value)
+const latestTurnFromHistory = computed(() => {
+  return changeLogs.value.find(log => log.turn_profile)?.turn_profile || null
 })
-const weakPointText = computed(() => {
-  const points = [...new Set([...(store.profile?.weak_points || []), ...(currentReport.value?.weak_points || [])])]
-  return points.length ? points.slice(0, 3).join('、') : '暂未识别'
+const turnWeakPointText = computed(() => {
+  const points = activeTurnProfile.value?.weak_points?.filter(Boolean) || []
+  return points.length ? points.slice(0, 6).join('、') : '等待本轮输入'
 })
-const preferenceText = computed(() => {
+const turnWeakPointCount = computed(() => activeTurnProfile.value?.weak_points?.filter(Boolean).length || 0)
+const turnPreferenceText = computed(() => {
+  const preferences = activeTurnProfile.value?.preferred_modalities?.filter(Boolean) || []
+  if (preferences.length) return preferences.slice(0, 3).join('、')
+  return activeTurnProfile.value?.cognitive_style || longTermPreferenceText.value
+})
+const longTermWeakPointCount = computed(() => store.profile?.weak_points?.filter(Boolean).length || 0)
+const longTermWeakPointText = computed(() => {
+  const points = store.profile?.weak_points?.filter(Boolean) || []
+  return points.length ? points.slice(0, 4).join('、') : '暂无已确认薄弱点'
+})
+const longTermPreferenceText = computed(() => {
   const preferences = store.profile?.preferred_modalities?.filter(Boolean) || []
   if (preferences.length) return preferences.slice(0, 3).join('、')
   return store.profile?.cognitive_style || '未记录'
 })
+const turnUnstableText = computed(() => {
+  const items = activeTurnProfile.value?.knowledge_base?.filter(Boolean) || []
+  return items.length ? items.slice(0, 3).join('、') : '无本轮先修基础结论'
+})
+const latestHistoryText = computed(() => {
+  if (historicalReport.value?.weak_points?.length) return `历史评估：${historicalReport.value.weak_points.slice(0, 2).join('、')}`
+  if (changeLogs.value.length) return `最近 ${changeLogs.value.length} 条更新可追溯`
+  return '暂无历史记录'
+})
 const primaryAdvice = computed(() => {
-  if (currentReport.value?.weak_points?.length) return '先补薄弱点'
-  if (store.profile?.learning_goal) return '按目标学习'
+  if (turnWeakPointCount.value) return '按本轮困惑学习'
+  if (currentReport.value?.weak_points?.length) return '先补练习薄弱点'
+  if (store.profile?.learning_goal) return '按长期目标学习'
   return '先补充画像'
 })
 const adviceDetail = computed(() => {
+  if (turnWeakPointCount.value) return `先围绕 ${turnWeakPointText.value} 生成图解、步骤和代码案例。`
   if (currentReport.value?.weak_points?.length) return `优先复习 ${currentReport.value.weak_points.slice(0, 2).join('、')}，再做一次练习确认。`
   if (store.profile?.weak_points?.length) return `先从 ${store.profile.weak_points.slice(0, 2).join('、')} 开始巩固。`
   if (store.profile?.learning_goal) return '先生成一组学习资料，再按路径完成练习。'
@@ -255,10 +293,23 @@ const currentFieldItems = computed(() => {
     after: formatProfileValue(value.after)
   }))
 })
-const currentExtractionCount = computed(() => currentFieldItems.value.length)
+const currentExtractionCount = computed(() => {
+  if (!activeTurnProfile.value) return 0
+  return [
+    activeTurnProfile.value.learning_goal,
+    activeTurnProfile.value.weak_points?.length,
+    activeTurnProfile.value.preferred_modalities?.length,
+    activeTurnProfile.value.cognitive_style,
+    activeTurnProfile.value.time_budget
+  ].filter(Boolean).length
+})
 const currentExtractionSummary = computed(() => {
-  if (!currentFieldItems.value.length) return '等待新的输入'
-  return currentFieldItems.value.map(item => item.label).slice(0, 3).join('、')
+  if (!activeTurnProfile.value) return '等待新的输入'
+  const items = []
+  if (activeTurnProfile.value.learning_goal) items.push('目标')
+  if (activeTurnProfile.value.weak_points?.length) items.push('困惑')
+  if (activeTurnProfile.value.preferred_modalities?.length || activeTurnProfile.value.cognitive_style) items.push('偏好')
+  return items.length ? items.join('、') : '本轮未识别新字段'
 })
 
 async function loadProfileMeta() {
@@ -285,6 +336,23 @@ async function send(message: string) {
     await loadProfileMeta()
   } finally {
     loading.value = false
+  }
+}
+
+async function clearProfile() {
+  if (!store.profile && !activeTurnProfile.value && !changeLogs.value.length) return
+  const confirmed = window.confirm('确定清空我的学习档案吗？这会删除长期画像、本轮识别结果和画像更新记录。')
+  if (!confirmed) return
+  profileDeleting.value = true
+  profileDeleteError.value = ''
+  try {
+    await store.clearProfile()
+    changeLogs.value = []
+    metaError.value = ''
+  } catch (error) {
+    profileDeleteError.value = friendlyErrorMessage(error, '学习档案清空失败')
+  } finally {
+    profileDeleting.value = false
   }
 }
 

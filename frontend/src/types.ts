@@ -22,6 +22,24 @@ export interface HealthStatus {
   course: string
 }
 
+export interface AuthUser {
+  id: string
+  username: string
+  display_name: string
+  created_at: string
+  last_login_at: string
+}
+
+export interface AuthStatus {
+  registration_mode: 'single' | 'open' | 'disabled'
+  has_user: boolean
+}
+
+export interface AuthSession extends AuthStatus {
+  token: string
+  user: AuthUser
+}
+
 export interface Profile {
   id: string
   major: string
@@ -68,6 +86,7 @@ export interface ProfileChangeLog {
   version: number
   trigger_message: string
   extracted: Record<string, unknown>
+  turn_profile?: Profile
   conflicts: string[]
   fusion_reason: string
   fusion_meta?: ProfileFusionMeta
@@ -111,6 +130,9 @@ export interface Resource {
   title: string
   content_format: 'markdown' | 'mermaid' | 'json' | 'code'
   content: string
+  artifact_url?: string
+  artifact_path?: string
+  artifact_filename?: string
   evidence_sources?: EvidenceSource[]
   source_refs: string[]
   difficulty: string
@@ -225,6 +247,7 @@ export interface LearningPathHistoryItem extends LearningPath {
 
 export interface ProfileChatResponse {
   profile: Profile
+  turn_profile?: Profile
   extracted: Record<string, unknown>
   confidence?: number
   source?: string

@@ -59,7 +59,9 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-当前测试结果：`44 passed`
+当前测试结果：`62 passed`
+
+提交包说明：项目按源码方式提交，后端 `.venv` 不随作品包提交；评委或运行环境按 `requirements.txt` 安装依赖即可复现运行。
 
 ## 真实模型 Provider 配置
 

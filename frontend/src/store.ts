@@ -1,9 +1,11 @@
 import { defineStore } from 'pinia'
-import { api } from './api'
+import { api, authToken, setAuthToken } from './api'
 import type {
   AgentTrace,
   AssessmentHistoryItem,
   AssessmentReport,
+  AuthStatus,
+  AuthUser,
   GenerationHistoryItem,
   GenerationHistorySummary,
   HealthStatus,
@@ -16,8 +18,12 @@ import type {
 } from './types'
 
 interface LearningState {
+  authUser: AuthUser | null
+  authStatus: AuthStatus | null
+  authReady: boolean
   health: HealthStatus | null
   profile: Profile | null
+  turnProfile: Profile | null
   resources: Resource[]
   resourceHistory: GenerationHistorySummary[]
   resourceHistoryDetails: Record<string, GenerationHistoryItem>
@@ -69,10 +75,18 @@ function markProfileResult() {
   localStorage.setItem(PROFILE_RESULT_STORAGE_KEY, 'true')
 }
 
+function clearProfileResult() {
+  localStorage.removeItem(PROFILE_RESULT_STORAGE_KEY)
+}
+
 export const useLearningStore = defineStore('learning', {
   state: (): LearningState => ({
+    authUser: null,
+    authStatus: null,
+    authReady: false,
     health: null,
     profile: null,
+    turnProfile: null,
     resources: [],
     resourceHistory: [],
     resourceHistoryDetails: {},
@@ -94,10 +108,71 @@ export const useLearningStore = defineStore('learning', {
     error: ''
   }),
   actions: {
+    async initAuth() {
+      try {
+        this.authStatus = await api.authStatus()
+        if (authToken()) {
+          const session = await api.me()
+          this.authUser = session.user
+          this.authStatus = { registration_mode: session.registration_mode, has_user: session.has_user }
+        }
+      } catch {
+        setAuthToken('')
+        this.authUser = null
+      } finally {
+        this.authReady = true
+      }
+    },
+    async login(username: string, password: string) {
+      const session = await api.login(username, password)
+      setAuthToken(session.token)
+      this.authUser = session.user
+      this.authStatus = { registration_mode: session.registration_mode, has_user: session.has_user }
+      this.resetLearningState()
+      await this.refresh()
+    },
+    async register(username: string, password: string, displayName = '') {
+      const session = await api.register(username, password, displayName)
+      setAuthToken(session.token)
+      this.authUser = session.user
+      this.authStatus = { registration_mode: session.registration_mode, has_user: session.has_user }
+      this.resetLearningState()
+      await this.refresh()
+    },
+    logout() {
+      setAuthToken('')
+      this.authUser = null
+      this.resetLearningState()
+    },
+    resetLearningState() {
+      this.profile = null
+      this.turnProfile = null
+      this.resources = []
+      this.resourceHistory = []
+      this.resourceHistoryDetails = {}
+      this.planSummary = null
+      this.traces = []
+      this.path = null
+      this.pathHistory = []
+      this.report = null
+      this.assessmentHistory = []
+      this.lastProfileUpdate = null
+      this.progress = 0
+      this.currentStep = '等待生成'
+      this.initialized = false
+      this.loading = false
+      this.assessing = false
+      this.refreshingQuiz = false
+      this.error = ''
+      localStorage.removeItem(ACTIVE_TASKS_STORAGE_KEY)
+      localStorage.removeItem(ACTIVE_ASSESSMENT_STORAGE_KEY)
+      localStorage.removeItem(PROFILE_RESULT_STORAGE_KEY)
+    },
     clearError() {
       this.error = ''
     },
     async ensureReady() {
+      if (!authToken()) return
       if (this.initialized) return
       await this.refresh()
     },
@@ -123,6 +198,7 @@ export const useLearningStore = defineStore('learning', {
         ])
         this.health = health
         this.profile = hasProfileResult() ? profile : null
+        this.turnProfile = null
         this.resources = hasActiveTasks() ? resources : []
         this.path = hasActiveTasks() ? path : null
         this.report = hasAssessmentResult() ? report : null
@@ -153,6 +229,7 @@ export const useLearningStore = defineStore('learning', {
           }
         }
         this.profile = data.profile
+        this.turnProfile = data.turn_profile || null
         markProfileResult()
         markActiveTasks()
         if (data.resources && data.resources.length > 0) {
@@ -164,6 +241,22 @@ export const useLearningStore = defineStore('learning', {
         await this.refreshHistories()
       } catch (error) {
         this.error = friendlyErrorMessage(error, '画像更新失败')
+      }
+    },
+    async clearProfile() {
+      try {
+        this.error = ''
+        const result = await api.clearProfile()
+        this.profile = null
+        this.turnProfile = null
+        this.lastProfileUpdate = null
+        this.path = null
+        this.pathHistory = []
+        clearProfileResult()
+        return result.profile
+      } catch (error) {
+        this.error = friendlyErrorMessage(error, '学习档案清空失败')
+        throw error
       }
     },
     async generateResources(resourceTypes: string[] | Event = [], taskPrompt = '') {
@@ -183,6 +276,7 @@ export const useLearningStore = defineStore('learning', {
         this.error = ''
         const job = await api.generateBackground(request)
         await this.watchGenerationJob(job.id)
+        await this.syncGeneratedResourcesAfterCompletion(requestedTypes.length)
         markActiveTasks()
         this.path = await api.path()
         await this.refreshHistories()
@@ -276,6 +370,23 @@ export const useLearningStore = defineStore('learning', {
         }
       })
     },
+    async syncGeneratedResourcesAfterCompletion(expectedCount = 0) {
+      let bestResources = this.resources
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          const latestResources = await api.resources()
+          if (latestResources.length >= bestResources.length) {
+            bestResources = latestResources
+          }
+          if (expectedCount > 0 && bestResources.length >= expectedCount) break
+          if (expectedCount <= 0 && attempt >= 1) break
+        } catch {
+          if (attempt >= 2) break
+        }
+        await new Promise(resolve => setTimeout(resolve, 450))
+      }
+      this.resources = bestResources
+    },
     async submitAssessment(answers: string[]) {
       this.assessing = true
       try {
@@ -344,6 +455,21 @@ export const useLearningStore = defineStore('learning', {
       } finally {
         resourceHistoryDetailPromises.delete(jobId)
         if (this.historyDetailLoadingId === jobId) this.historyDetailLoadingId = ''
+      }
+    },
+    async deleteResourceHistory(jobId: string) {
+      try {
+        this.error = ''
+        await api.deleteResourceHistory(jobId)
+        this.resourceHistory = this.resourceHistory.filter(item => item.id !== jobId)
+        const remainingDetails = { ...this.resourceHistoryDetails }
+        delete remainingDetails[jobId]
+        this.resourceHistoryDetails = remainingDetails
+        resourceHistoryDetailPromises.delete(jobId)
+        if (this.historyDetailLoadingId === jobId) this.historyDetailLoadingId = ''
+      } catch (error) {
+        this.error = friendlyErrorMessage(error, '历史资料包删除失败')
+        throw error
       }
     },
     async refreshHistories() {
